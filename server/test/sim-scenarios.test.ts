@@ -1,11 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { makeApp, configure, pinHeaders } from "./helpers.js";
+import { makeApp, configure } from "./helpers.js";
 import type { BuiltApp } from "../src/app.js";
 
-// Covers the scenarios added on top of the original set: a payment with a wrong
-// VS (does not reconcile) and "customer did not pay" (abandon -> EXPIRED).
+// Covers behaviors that previously had dedicated /api/sim/* HTTP routes (now
+// removed). The underlying service/gateway capabilities still exist and are
+// exercised directly here: wrong-VS deposits don't reconcile, an abandoned
+// session expires, the bank can be marked unavailable, and a late payment
+// (after expiry) must not resurrect a session.
 
-describe("simulator scenario: wrongvs", () => {
+describe("scenario: wrongvs", () => {
   let app: BuiltApp;
   beforeEach(async () => {
     app = await makeApp();
@@ -26,7 +29,7 @@ describe("simulator scenario: wrongvs", () => {
   });
 });
 
-describe("simulator scenario: abandon (customer did not pay)", () => {
+describe("scenario: abandon (customer did not pay)", () => {
   let app: BuiltApp;
   beforeEach(async () => {
     app = await makeApp();
@@ -43,51 +46,38 @@ describe("simulator scenario: abandon (customer did not pay)", () => {
     expect((await app.sessions.getSession(s.id)).status).toBe("EXPIRED");
   });
 
-  it("POST /api/sim/scenario/abandon expires the active session", async () => {
-    const s = await app.sessions.createSession({ amount: "70.00" });
-    const res = await app.fastify.inject({
-      method: "POST",
-      url: "/api/sim/scenario/abandon",
-      headers: pinHeaders(),
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().target).toBe(s.id);
-    expect((await app.sessions.getSession(s.id)).status).toBe("EXPIRED");
-  });
-
-  it("POST /api/sim/scenario/abandon returns 409 when nothing is active", async () => {
-    const res = await app.fastify.inject({
-      method: "POST",
-      url: "/api/sim/scenario/abandon",
-      headers: pinHeaders(),
-    });
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error).toBe("no_active_session");
-  });
-
   it("an EXPIRED session cannot be expired again", async () => {
     const s = await app.sessions.createSession({ amount: "50.00" });
     await app.sessions.expireSession(s.id);
     await expect(app.sessions.expireSession(s.id)).rejects.toThrow();
   });
+});
 
-  it("GET /api/sim/state reflects bank availability and it can be restored", async () => {
-    expect((await app.fastify.inject({ method: "GET", url: "/api/sim/state" })).json().available).toBe(true);
-    // The "unavailable" scenario takes the bank down with no auto-recovery...
-    await app.fastify.inject({ method: "POST", url: "/api/sim/scenario/unavailable", headers: pinHeaders() });
-    expect((await app.fastify.inject({ method: "GET", url: "/api/sim/state" })).json().available).toBe(false);
-    // ...and the restore toggle brings it back.
-    await app.fastify.inject({
-      method: "POST",
-      url: "/api/sim/unavailable",
-      headers: pinHeaders(),
-      payload: { available: true },
-    });
-    expect((await app.fastify.inject({ method: "GET", url: "/api/sim/state" })).json().available).toBe(true);
+describe("scenario: bank unavailable -> UNKNOWN, then recovery", () => {
+  let app: BuiltApp;
+  beforeEach(async () => {
+    app = await makeApp();
+    await configure(app);
+  });
+  afterEach(async () => {
+    await app.fastify.close();
+  });
+
+  it("an unavailable bank never marks PAID; open sessions go UNKNOWN and recover", async () => {
+    const s = await app.sessions.createSession({ amount: "40.00" });
+    app.simulator!.setAvailable(false);
+    await app.matching.tick();
+    expect((await app.sessions.getSession(s.id)).status).toBe("UNKNOWN");
+
+    // Bank recovers and the exact payment is present -> back to PENDING then PAID.
+    app.simulator!.setAvailable(true);
+    app.simulator!.scenario("exact", { vs: s.vs, amount: "40.00" });
+    await app.matching.tick();
+    expect((await app.sessions.getSession(s.id)).status).toBe("PAID");
   });
 });
 
-describe("simulator scenario: late (payment arrives after expiry)", () => {
+describe("scenario: late (payment arrives after expiry)", () => {
   let app: BuiltApp;
   beforeEach(async () => {
     app = await makeApp();
@@ -99,15 +89,11 @@ describe("simulator scenario: late (payment arrives after expiry)", () => {
 
   it("expires the session first, then the late payment does NOT mark it paid", async () => {
     const s = await app.sessions.createSession({ amount: "25.00" });
-    const res = await app.fastify.inject({
-      method: "POST",
-      url: "/api/sim/scenario/late",
-      headers: pinHeaders(),
-    });
-    expect(res.statusCode).toBe(200);
-    // Session is already EXPIRED right after the call (before the poll runs).
+    // Customer abandons: force the session EXPIRED before any deposit lands.
+    await app.sessions.expireSession(s.id);
     expect((await app.sessions.getSession(s.id)).status).toBe("EXPIRED");
     // The late deposit is then processed and must NOT resurrect the session.
+    app.simulator!.enqueue({ amount: "25.00", vs: s.vs });
     await app.matching.tick();
     expect((await app.sessions.getSession(s.id)).status).toBe("EXPIRED");
   });

@@ -13,6 +13,30 @@ export interface StoredTransaction {
   unmatchedReason: string | null;
 }
 
+/** Public DTO for an incoming bank transaction (operator "today's payments" view). */
+export interface TransactionDTO {
+  externalId: string;
+  amount: string;
+  vs: string | null;
+  receivedAt: string;
+  matched: boolean;
+  matchedSessionId: string | null;
+  /** Unmatched reason ("no-session" | "duplicate" | "currency"), or null when matched. */
+  reason: string | null;
+}
+
+export function transactionToDTO(t: StoredTransaction): TransactionDTO {
+  return {
+    externalId: t.externalId,
+    amount: t.amount,
+    vs: t.vs,
+    receivedAt: t.receivedAt,
+    matched: t.matchedSessionId != null,
+    matchedSessionId: t.matchedSessionId,
+    reason: t.unmatchedReason,
+  };
+}
+
 export interface SessionFilter {
   status?: string;
   from?: Date;
@@ -42,4 +66,7 @@ export interface SessionRepository {
   // config
   getConfig(): Promise<MerchantConfig | null>;
   setConfig(config: MerchantConfig): Promise<void>;
+
+  /** Factory reset: wipe config, sessions and transactions (back to first run). */
+  reset(): Promise<void>;
 }

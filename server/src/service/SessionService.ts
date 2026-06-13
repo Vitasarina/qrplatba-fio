@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
   isConfigured,
-  isLicensed,
   configToDTO,
   configToDisplayDTO,
   validateConfig,
@@ -63,17 +62,19 @@ export class SessionService {
     return configToDTO(cfg);
   }
 
+  /** Factory reset: clear config, sessions and transactions (back to first run). */
+  async reset(): Promise<void> {
+    await this.repo.reset();
+  }
+
   // ---- sessions ----
 
   async createSession(input: CreateSessionInput): Promise<PaymentSession> {
     const config = await this.repo.getConfig();
     if (!isConfigured(config)) {
       throw new NotConfiguredError(
-        "Merchant is not configured (name, IBAN and token are required).",
+        "Obchodník není nakonfigurován (vyžadován název a IBAN/číslo účtu).",
       );
-    }
-    if (!isLicensed(config)) {
-      throw new NotLicensedError("No valid license key — issuing payments is blocked.");
     }
 
     const amount: Money = parseAmount(input.amount);

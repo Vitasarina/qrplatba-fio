@@ -23,6 +23,18 @@ serverová logika je zároveň spustitelnou specifikací pro pozdější port do
 - `web/` — React/Vite: obrazovky nastavení, zadání obsluhy, displej, historie + ovládací panel simulátoru
 - `android/` — **produkční nativní aplikace** (Kotlin + vestavěný Ktor server, foreground service, WebView). Doménová logika portována ze `server/`, React build ze `web/` zabalen v assets.
 
+## PC varianta (.exe)
+
+`server/` zároveň slouží jako **desktopová verze**: jeden spustitelný soubor, který na PC běží jako backend a servíruje web (operátor/nastavení lokálně, displej z mobilu přes LAN). Build:
+
+```bash
+cd server
+npm install
+npm run build:exe   # vytvoří dist-pc/qr-payments-win.exe (+ linux)
+```
+
+Po spuštění `.exe` vypíše URL: operátor na `http://localhost:8080`, displej pro mobil na `http://<IP-PC>:8080/display`. Data se ukládají vedle .exe (`qr-data/`). Režim určuje token Fio (prázdný = simulace).
+
 ## Build Android APK
 
 Toolchain (JDK 17, Android SDK, Gradle) je v tomto prostředí nainstalovaný. Build:

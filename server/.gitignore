@@ -1,4 +1,6 @@
 node_modules/
 dist/
+dist-pc/
+qr-data/
 data/
 *.log

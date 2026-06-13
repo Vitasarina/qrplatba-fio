@@ -140,6 +140,14 @@ export class JsonSessionRepository implements SessionRepository {
     this.persist();
   }
 
+  /** Factory reset: wipe config, sessions and transactions (back to first run). */
+  async reset(): Promise<void> {
+    this.sessions.clear();
+    this.txs.clear();
+    this.config = null;
+    this.persist();
+  }
+
   // ---- persistence plumbing ----
 
   private snapshot(): PersistShape {

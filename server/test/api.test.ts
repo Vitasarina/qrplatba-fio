@@ -57,7 +57,7 @@ describe("HTTP API contract", () => {
     expect(res.json().error).toBe("not_configured");
   });
 
-  it("blocks session creation when configured but not licensed (AC-1.5)", async () => {
+  it("allows session creation without a license key (license is no longer a gate)", async () => {
     await app.fastify.inject({
       method: "POST",
       url: "/api/config",
@@ -70,8 +70,26 @@ describe("HTTP API contract", () => {
       headers: pinHeaders(),
       payload: { amount: "100.00" },
     });
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error).toBe("not_licensed");
+    expect(res.statusCode).toBe(201);
+  });
+
+  it("allows session creation with NO token (empty token -> simulation mode)", async () => {
+    const cfg = await app.fastify.inject({
+      method: "POST",
+      url: "/api/config",
+      headers: pinHeaders(),
+      payload: { name: "Shop", iban: VALID_IBAN }, // no token, no license
+    });
+    expect(cfg.statusCode).toBe(200);
+    expect(cfg.json().mode).toBe("simulace");
+    expect(cfg.json().configured).toBe(true);
+    const res = await app.fastify.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: pinHeaders(),
+      payload: { amount: "100.00" },
+    });
+    expect(res.statusCode).toBe(201);
   });
 
   it("POST /api/sessions returns the documented contract", async () => {
@@ -205,7 +223,7 @@ describe("HTTP API contract", () => {
     expect(res.body).toContain('"with,comma"'); // quoted because of comma
   });
 
-  it("sim control endpoints drive a payment to PAID", async () => {
+  it("POST /api/sessions/:id/check forces a poll and drives the payment to PAID", async () => {
     await configure(app);
     const created = (
       await app.fastify.inject({
@@ -216,16 +234,17 @@ describe("HTTP API contract", () => {
       })
     ).json();
 
-    const sim = await app.fastify.inject({
-      method: "POST",
-      url: "/api/sim/scenario/exact",
-    });
-    expect(sim.statusCode).toBe(200);
-    expect(sim.json().target).toBe(created.id);
+    // Enqueue an exact-amount deposit on the injected simulator gateway.
+    app.simulator!.scenario("exact", { vs: created.vs, amount: "99.00" });
 
-    await app.matching.tick();
-    const after = await app.fastify.inject({ method: "GET", url: `/api/sessions/${created.id}` });
-    expect(after.json().status).toBe("PAID");
+    // /check runs one poll cycle and returns the updated session.
+    const checked = await app.fastify.inject({
+      method: "POST",
+      url: `/api/sessions/${created.id}/check`,
+      headers: pinHeaders(),
+    });
+    expect(checked.statusCode).toBe(200);
+    expect(checked.json().status).toBe("PAID");
   });
 
   it("cookie PIN also authorizes", async () => {

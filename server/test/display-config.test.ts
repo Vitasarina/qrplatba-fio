@@ -47,9 +47,9 @@ describe("display config + logo", () => {
     const res = await app.fastify.inject({ method: "GET", url: "/api/display-config" });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body).toEqual({ name: "Kavárna", logoUrl: "https://example.com/logo.png" });
+    expect(body).toEqual({ name: "Kavárna", logoUrl: "https://example.com/logo.png", mode: "fio" });
     // No token / license / iban leaked to the public endpoint.
-    expect(Object.keys(body).sort()).toEqual(["logoUrl", "name"]);
+    expect(Object.keys(body).sort()).toEqual(["logoUrl", "mode", "name"]);
   });
 
   it("rejects a logoUrl that is not an http(s) URL", async () => {
