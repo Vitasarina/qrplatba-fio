@@ -1,0 +1,31 @@
+# --- Node / web ---
+node_modules/
+dist/
+*.log
+.vite/
+
+# --- generated web bundle copied into the Android app ---
+android/app/src/main/assets/web/
+
+# --- Android / Gradle ---
+.gradle/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+*.aab
+*.keystore
+
+# --- runtime data (local state, never commit) ---
+server/data/
+data/
+
+# --- agent / tooling scratch ---
+.claude/
+
+# --- OS / editor ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
