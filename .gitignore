@@ -17,6 +17,9 @@ android/local.properties
 *.apk
 *.aab
 *.keystore
+# ...but DO keep the published build in download/
+!download/*.apk
+!download/*.exe
 
 # --- runtime data (local state, never commit) ---
 server/data/
