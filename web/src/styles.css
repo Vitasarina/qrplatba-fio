@@ -149,6 +149,54 @@ input.invalid { border-color: var(--danger); }
 .btn.block { width: 100%; }
 .btn.lg { padding: 0.95rem 1.4rem; font-size: 1.1rem; }
 
+/* ---------- Toggle switch ---------- */
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  cursor: pointer;
+  user-select: none;
+}
+/* Visually-hidden native checkbox (still focusable + accessible). */
+.toggle-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.toggle-track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 0.15s ease;
+}
+.toggle-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.25);
+  transition: transform 0.15s ease;
+}
+.toggle-input:checked + .toggle-track { background: var(--primary); }
+.toggle-input:checked + .toggle-track .toggle-thumb { transform: translateX(18px); }
+.toggle-input:focus-visible + .toggle-track {
+  outline: 3px solid rgba(37, 99, 235, 0.4);
+  outline-offset: 2px;
+}
+.toggle-label { font-weight: 600; font-size: 0.95rem; }
+
 /* ---------- Status badge ---------- */
 .badge {
   display: inline-flex;
@@ -225,7 +273,11 @@ tbody tr:hover { background: var(--surface-2); }
 /* ---------- Display screen (tablet, customer-facing) ---------- */
 .display {
   position: relative;
-  min-height: 100vh;
+  /* Fixed to the full viewport (not min-height) so a 180° rotation about the
+     centre keeps the screen perfectly full-bleed regardless of content height. */
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
   background: var(--bg);
   color: #f8fafc;
   display: flex;
@@ -234,6 +286,8 @@ tbody tr:hover { background: var(--surface-2); }
   justify-content: center;
   text-align: center;
   padding: 2rem;
+  /* Rotation is applied inline (0 or 180deg) based on the screen + flipped flag. */
+  transform-origin: center center;
 }
 
 /* Idle screensaver: full-width logo + "QR platba" caption, centred, nudged
@@ -342,12 +396,15 @@ tbody tr:hover { background: var(--surface-2); }
 
 /* PIN gate (protects operator/config screens). */
 .pin-gate {
-  min-height: 100vh;
+  /* dvh + scroll so the centered form stays reachable above the soft keyboard
+     (the viewport shrinks via interactive-widget=resizes-content when it opens). */
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 1.5rem;
   box-sizing: border-box;
+  overflow-y: auto;
 }
 .pin-card {
   width: 100%;
@@ -438,3 +495,62 @@ tbody tr:hover { background: var(--surface-2); }
   border: 1px solid rgba(253, 186, 116, 0.35);
   pointer-events: none; z-index: 5;
 }
+
+/* ---------- On-device numpad (operator-facing entry) ---------- */
+.numpad {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.9rem;
+  width: 100%;
+  max-width: 460px;
+}
+/* The amount is a plain block (NOT an <input>) so the system keyboard never
+   opens; the custom keypad is the only input. */
+.numpad-amount {
+  font-size: clamp(2.5rem, 9vw, 4.5rem);
+  font-weight: 800;
+  line-height: 1.1;
+  text-align: center;
+  min-height: 1.2em;
+  word-break: break-all;
+}
+.numpad-czk { font-size: 0.5em; font-weight: 700; color: #93c5fd; }
+.numpad-error {
+  text-align: center;
+  color: #fca5a5;
+  font-size: clamp(0.95rem, 2.5vw, 1.2rem);
+  font-weight: 600;
+}
+.numpad-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.6rem;
+}
+.numpad-key {
+  appearance: none;
+  border: 1px solid #334155;
+  background: var(--bg-soft);
+  color: #f8fafc;
+  border-radius: 14px;
+  font-size: clamp(1.5rem, 6vw, 2.4rem);
+  font-weight: 700;
+  /* Big, touch-friendly targets — operator taps on a phone. */
+  min-height: clamp(56px, 13vh, 88px);
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.1s ease, transform 0.05s ease;
+}
+.numpad-key:active:not(:disabled) { background: #334155; transform: scale(0.97); }
+.numpad-key:focus-visible { outline: 3px solid rgba(96, 165, 250, 0.6); outline-offset: 2px; }
+.numpad-key:disabled { opacity: 0.5; cursor: not-allowed; }
+.numpad-key-clear { color: #fca5a5; }
+.numpad-key-back { color: #cbd5e1; }
+.numpad-key-enter {
+  background: var(--primary);
+  border-color: var(--primary);
+  font-size: clamp(1.1rem, 4vw, 1.7rem);
+}
+.numpad-key-enter:active:not(:disabled) { background: var(--primary-hover); }
+.numpad-key-enter:disabled { background: #1e3a8a; border-color: #1e3a8a; }

@@ -29,6 +29,16 @@ const router = createBrowserRouter([
   { path: '*', element: <Navigate to="/operator" replace /> },
 ])
 
+// When a field gets focus and the soft keyboard opens, scroll it into the visible
+// area (the keyboard otherwise covers inputs on mobile). The delay lets the
+// keyboard / viewport resize settle first.
+document.addEventListener('focusin', (e) => {
+  const t = e.target as HTMLElement | null
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) {
+    setTimeout(() => t.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300)
+  }
+})
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <RouterProvider router={router} />

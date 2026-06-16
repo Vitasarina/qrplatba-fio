@@ -53,19 +53,44 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  // Validates the stored PIN against the server (used by the PIN gate). Throws ApiError(401) if wrong.
+  // Validates the stored password against the server (used by the password gate).
+  // The password travels in the x-pin header. Throws ApiError(401) if wrong.
   auth(): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>('/api/auth')
+  },
+  // Public: whether a settings password has already been created. Drives the
+  // first-run ("create") vs. returning ("enter") branch of the password gate.
+  getPasswordStatus(): Promise<{ passwordSet: boolean }> {
+    return request<{ passwordSet: boolean }>('/api/password/status')
+  },
+  // First-run only: create the settings password. Device-only — the backend
+  // rejects remote callers with HTTP 403. Min length 4 (enforced both sides).
+  setupPassword(password: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>('/api/password/setup', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    })
+  },
+  // Change an existing settings password (requires the current one). Min 4.
+  changePassword(current: string, next: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>('/api/password/change', {
+      method: 'POST',
+      body: JSON.stringify({ current, new: next }),
+    })
   },
   getConfig(): Promise<AppConfig> {
     return request<AppConfig>('/api/config')
   },
+  // Persist shop config. `tokens` is the ordered list of token rows: a value
+  // containing '*' is a mask ⇒ keep the stored token at that position; any other
+  // non-empty value sets/replaces it; blanks are dropped by the backend. Max 32.
+  // No password is sent here — the password is managed via the dedicated endpoints.
   saveConfig(cfg: {
     name: string
     iban: string
-    token: string // optional value; empty string ⇒ simulation mode
     logoUrl: string
-    pin: string
+    tokens: string[]
+    flipped: boolean
   }): Promise<AppConfig> {
     return request<AppConfig>('/api/config', {
       method: 'POST',
@@ -115,9 +140,9 @@ export const api = {
     return request<NetInfo>('/api/net-info')
   },
 
-  // Reset the operator PIN to the default (1234). The backend only honours this
-  // when called from the device itself (localhost); remote callers get HTTP 403.
-  // No PIN is sent/required — this is the recovery path for a forgotten PIN.
+  // Clear the settings password back to first-run (the next entry to settings
+  // will create a new one). Loopback-only — the backend rejects remote callers
+  // with HTTP 403. No password is sent: this is the forgotten-password recovery.
   resetPin(): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>('/api/pin/reset', { method: 'POST' })
   },

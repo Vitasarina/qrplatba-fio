@@ -30,15 +30,21 @@ class SessionService(
 
     fun getDisplayConfigDTO(): DisplayConfigDTO = Config.toDisplayDTO(repo.getConfig())
 
+    /**
+     * Save merchant config. The password is NOT taken from this call — it is managed
+     * only by the password endpoints. The existing stored password (config.pin) is
+     * preserved across config saves.
+     */
     fun setConfig(
         name: String?,
         iban: String?,
-        token: String?,
+        tokens: List<String>?,
         licenseKey: String?,
         logoUrl: String?,
-        pin: String?,
+        flipped: Boolean? = null,
     ): ConfigDTO {
-        val cfg = Config.validate(name, iban, token, licenseKey, logoUrl, pin)
+        val existingPin = repo.getConfig()?.pin ?: ""
+        val cfg = Config.validate(name, iban, tokens, licenseKey, logoUrl, existingPin, flipped)
         repo.setConfig(cfg)
         return Config.toDTO(cfg)
     }

@@ -12,6 +12,7 @@ import java.math.BigDecimal
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Fio Bank gateway (real). Pulls incremental movements from the Fio REST API.
@@ -20,8 +21,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * The `/last` endpoint returns movements since the server-side bookmark ("zarážka")
  * and advances it, so each successful call returns only new transactions.
  *
- * Fio rate limit: 1 request / token / 30 s. The poller's 30 s interval already
- * respects this; calling fetchNewTransactions() more often risks an HTTP 409/429.
+ * MULTIPLE TOKENS (round-robin): the gateway holds up to MAX_TOKENS tokens and uses
+ * the NEXT token (round-robin) on each [fetchNewTransactions] call. Each token has its
+ * own server-side Fio bookmark, so rotating tokens still catches a payment within one
+ * polling cycle, and the matcher is idempotent by externalId so any overlap is harmless.
+ *
+ * Fio rate limit: 1 request / token / 30 s. With N tokens the poller may query every
+ * 30000/N ms because each individual token is still hit at most once per 30 s.
  *
  * Column mapping (each transaction is { "columnN": { value, name, id } }):
  *   column0  = date (datum)            -> receivedAt
@@ -34,13 +40,30 @@ import java.util.concurrent.atomic.AtomicBoolean
  * never to PAID. HTTPS only, read-only token.
  */
 class FioGateway(
-    private val token: String,
+    private val tokens: List<String>,
     private val baseUrl: String = "https://fioapi.fio.cz/v1/rest",
 ) : BankGateway {
 
+    /** Convenience constructor for a single token (kept for callers/tests). */
+    constructor(token: String, baseUrl: String = "https://fioapi.fio.cz/v1/rest")
+        : this(listOf(token), baseUrl)
+
+    private val tokenList: List<String> =
+        tokens.map { it.trim() }.filter { it.isNotEmpty() }
+
     private val lastOk = AtomicBoolean(true)
+    private val rotation = AtomicInteger(0)
+
+    /** The token used by the NEXT fetch (round-robin). Exposed for tests. */
+    fun nextToken(): String {
+        require(tokenList.isNotEmpty()) { "FioGateway requires at least one token" }
+        val i = (rotation.getAndIncrement() % tokenList.size + tokenList.size) % tokenList.size
+        return tokenList[i]
+    }
 
     override fun fetchNewTransactions(): List<BankTransaction> {
+        if (tokenList.isEmpty()) return emptyList()
+        val token = nextToken()
         val body = httpGet("$baseUrl/last/$token/transactions.json")
         return try {
             val txs = parseFioTransactions(body)

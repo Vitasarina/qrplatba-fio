@@ -67,6 +67,30 @@ class GatewayTest {
         FioGateway.parseFioTransactions("not json")
     }
 
+    // ---- FioGateway round-robin token rotation (no network) ----
+
+    @Test fun fioRotatesTokensRoundRobin() {
+        val fio = FioGateway(listOf("t1", "t2", "t3"))
+        // nextToken() advances the rotation index deterministically.
+        assertEquals("t1", fio.nextToken())
+        assertEquals("t2", fio.nextToken())
+        assertEquals("t3", fio.nextToken())
+        assertEquals("t1", fio.nextToken()) // wraps
+    }
+
+    @Test fun fioSingleTokenAlwaysSame() {
+        val fio = FioGateway("only")
+        assertEquals("only", fio.nextToken())
+        assertEquals("only", fio.nextToken())
+    }
+
+    @Test fun fioTrimsAndDropsBlankTokens() {
+        val fio = FioGateway(listOf("  a ", "", "   ", "b"))
+        assertEquals("a", fio.nextToken())
+        assertEquals("b", fio.nextToken())
+        assertEquals("a", fio.nextToken())
+    }
+
     // ---- ModeGateway simulation: auto-confirm open sessions -> PAID ----
 
     private class SimHarness {
@@ -75,8 +99,8 @@ class GatewayTest {
         val gateway = ModeGateway(repo)
         val sessions = SessionService(repo, events, 5 * 60 * 1000)
         val matching = MatchingService(repo, gateway, events)
-        // No token -> simulation mode.
-        fun configureSim() = sessions.setConfig("Shop", VALID_IBAN, "", "", null, null)
+        // No tokens -> simulation mode.
+        fun configureSim() = sessions.setConfig("Shop", VALID_IBAN, emptyList(), "", null)
     }
 
     @Test fun simModeAutoConfirmsOpenSessionToPaid() {
@@ -85,17 +109,18 @@ class GatewayTest {
         assertEquals(SessionStatus.PENDING, s.status)
         // gateway available in sim mode regardless of network
         assertTrue(h.gateway.isAvailable())
-        h.matching.tick()
+        // forceCheck (manual /check) polls immediately, auto-confirming the open session.
+        h.matching.forceCheck()
         assertEquals(SessionStatus.PAID, h.sessions.getSession(s.id).status)
     }
 
     @Test fun simAutoConfirmIsIdempotent() {
         val h = SimHarness(); h.configureSim()
         val s = h.sessions.createSession("50.00")
-        h.matching.tick()
+        h.matching.forceCheck()
         assertEquals(SessionStatus.PAID, h.sessions.getSession(s.id).status)
-        // A second tick must not record a duplicate or change the paid session.
-        h.matching.tick()
+        // A second poll must not record a duplicate or change the paid session.
+        h.matching.forceCheck()
         assertEquals(1, h.repo.listTransactions().size)
         assertEquals(SessionStatus.PAID, h.sessions.getSession(s.id).status)
     }
@@ -105,7 +130,9 @@ class GatewayTest {
         val events = EventBus()
         // Inject a fake fio gateway via the factory so no network is hit.
         var fetched = 0
-        val gateway = ModeGateway(repo, fioFactory = {
+        var receivedTokens: List<String> = emptyList()
+        val gateway = ModeGateway(repo, fioFactory = { toks ->
+            receivedTokens = toks
             object : cz.qrplatba.gateway.BankGateway {
                 override fun fetchNewTransactions(): List<cz.qrplatba.gateway.BankTransaction> {
                     fetched++
@@ -116,12 +143,13 @@ class GatewayTest {
         })
         val sessions = SessionService(repo, events, 5 * 60 * 1000)
         val matching = MatchingService(repo, gateway, events)
-        // Token present -> Fio mode.
-        sessions.setConfig("Shop", VALID_IBAN, "real-token", "", null, null)
+        // Tokens present -> Fio mode.
+        sessions.setConfig("Shop", VALID_IBAN, listOf("real-token", "second-token"), "", null)
         val s = sessions.createSession("10.00")
-        matching.tick()
-        // Fio factory was used; session is NOT auto-confirmed (no fake tx emitted).
+        matching.forceCheck()
+        // Fio factory was used (with the full token list); session is NOT auto-confirmed.
         assertTrue("fio gateway should have been polled", fetched > 0)
+        assertEquals(listOf("real-token", "second-token"), receivedTokens)
         assertEquals(SessionStatus.PENDING, sessions.getSession(s.id).status)
     }
 }

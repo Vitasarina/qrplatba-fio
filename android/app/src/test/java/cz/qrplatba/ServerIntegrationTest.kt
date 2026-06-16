@@ -14,9 +14,14 @@ import java.net.URL
 
 /**
  * Boots the real embedded Ktor server on a free port and exercises the HTTP API
- * end to end (PIN guard, public endpoints, session lifecycle, simulator, matching).
- * This covers the HTTP/SSE-routing layer that the pure-domain unit tests don't —
- * the only piece left for on-device testing is the Android WebView shell itself.
+ * end to end (mandatory-password guard, public endpoints, session lifecycle,
+ * simulator, matching, multiple tokens). This covers the HTTP/SSE-routing layer
+ * that the pure-domain unit tests don't — the only piece left for on-device testing
+ * is the Android WebView shell itself.
+ *
+ * Mandatory password: there is NO default. Each test that needs operator access first
+ * calls POST /api/password/setup (loopback — the test client is 127.0.0.1) to create the
+ * password "1234", after which `pin = true` (x-pin: 1234) authenticates as before.
  */
 class ServerIntegrationTest {
 
@@ -51,12 +56,18 @@ class ServerIntegrationTest {
     private fun field(json: String, key: String): String? =
         Regex("\"$key\":\"([^\"]*)\"").find(json)?.groupValues?.get(1)
 
+    /** Create the mandatory password (loopback-only setup) so operator endpoints unlock. */
+    private fun setupPassword(base: String, password: String = "1234") {
+        val r = req(base, "POST", "/api/password/setup", "{\"password\":\"$password\"}")
+        assertEquals("password setup should succeed: ${r.body}", 200, r.code)
+    }
+
     @Test
     fun full_payment_flow_over_http() {
         val port = ServerSocket(0).use { it.localPort }
         val base = "http://127.0.0.1:$port"
         val repo = JsonSessionRepository(null)
-        val server = AppServer(AppConfig(port = port, host = "127.0.0.1", pin = "1234"), repo, ModeGateway(repo)) { null }
+        val server = AppServer(AppConfig(port = port, host = "127.0.0.1"), repo, ModeGateway(repo)) { null }
         server.start()
         try {
             // Wait until the server is accepting connections.
@@ -72,10 +83,20 @@ class ServerIntegrationTest {
             }
             assertTrue("server did not start", up)
 
-            // PIN guard: operator endpoint without a PIN is rejected.
-            assertEquals(401, req(base, "GET", "/api/config").code)
+            // First run: no password set yet.
+            val st0 = req(base, "GET", "/api/password/status")
+            assertEquals(200, st0.code)
+            assertTrue("expected passwordSet:false, got: ${st0.body}", st0.body.contains("\"passwordSet\":false"))
 
-            // Auth check endpoint: rejects without PIN, accepts the (default) PIN.
+            // Before any password is set, operator endpoints are locked (401), even with a guess.
+            assertEquals(401, req(base, "GET", "/api/config").code)
+            assertEquals(401, req(base, "GET", "/api/config", pin = true).code)
+            assertEquals(401, req(base, "GET", "/api/auth", pin = true).code)
+
+            // Create the mandatory password (loopback setup), then auth works.
+            setupPassword(base)
+            val st1 = req(base, "GET", "/api/password/status")
+            assertTrue("expected passwordSet:true, got: ${st1.body}", st1.body.contains("\"passwordSet\":true"))
             assertEquals(401, req(base, "GET", "/api/auth").code)
             assertEquals(200, req(base, "GET", "/api/auth", pin = true).code)
 
@@ -95,7 +116,7 @@ class ServerIntegrationTest {
             // Not configured yet -> creating a session is blocked.
             assertEquals(409, req(base, "POST", "/api/sessions", "{\"amount\":\"10.00\"}", pin = true).code)
 
-            // Configure the merchant WITHOUT a token -> simulation/auto-confirm mode.
+            // Configure the merchant WITHOUT tokens -> simulation/auto-confirm mode.
             val cfg = req(
                 base, "POST", "/api/config",
                 "{\"name\":\"Shop\",\"iban\":\"CZ6508000000192000145399\",\"logoUrl\":\"\"}",
@@ -103,6 +124,7 @@ class ServerIntegrationTest {
             )
             assertEquals(200, cfg.code)
             assertTrue("config should report simulation mode: ${cfg.body}", cfg.body.contains("\"mode\":\"simulace\""))
+            assertTrue("config should report tokenCount 0: ${cfg.body}", cfg.body.contains("\"tokenCount\":0"))
 
             // Create a payment session.
             val created = req(base, "POST", "/api/sessions", "{\"amount\":\"123.00\"}", pin = true)
@@ -115,8 +137,8 @@ class ServerIntegrationTest {
             assertEquals(200, active.code)
             assertEquals(id, field(active.body, "id"))
 
-            // In simulation mode one poll cycle auto-confirms the open session.
-            server.matching.tick()
+            // In simulation mode a forced check auto-confirms the open session.
+            server.matching.forceCheck()
 
             // Session is now PAID (public read).
             val paid = req(base, "GET", "/api/sessions/$id")
@@ -132,12 +154,11 @@ class ServerIntegrationTest {
 
     /** Boots a server on a free port and waits until it accepts connections. */
     private fun bootServer(
-        pin: String = "1234",
         repo: JsonSessionRepository = JsonSessionRepository(null),
     ): Triple<AppServer, String, Int> {
         val port = ServerSocket(0).use { it.localPort }
         val base = "http://127.0.0.1:$port"
-        val server = AppServer(AppConfig(port = port, host = "127.0.0.1", pin = pin), repo, ModeGateway(repo)) { null }
+        val server = AppServer(AppConfig(port = port, host = "127.0.0.1"), repo, ModeGateway(repo)) { null }
         server.start()
         var up = false
         for (i in 0 until 50) {
@@ -147,8 +168,9 @@ class ServerIntegrationTest {
         return Triple(server, base, port)
     }
 
-    /** Configure WITHOUT a token -> simulation mode (auto-confirm), no license required. */
+    /** Set up the password ("1234") then configure WITHOUT tokens -> simulation mode. */
     private fun configure(base: String) {
+        setupPassword(base)
         val cfg = req(
             base, "POST", "/api/config",
             "{\"name\":\"Shop\",\"iban\":\"CZ6508000000192000145399\",\"logoUrl\":\"\"}",
@@ -217,27 +239,23 @@ class ServerIntegrationTest {
     }
 
     @Test
-    fun pin_reset_from_loopback_restores_default() {
-        // The test HTTP client connects from 127.0.0.1, so this exercises the loopback (allowed) path.
-        // The 403 remote/LAN path cannot be simulated here without a non-loopback client.
+    fun password_setup_loopback_only_and_only_when_unset() {
         val (server, base, _) = bootServer()
         try {
-            // Set a custom PIN; the default (1234) stops working.
-            val saved = req(
-                base, "POST", "/api/config",
-                "{\"name\":\"Shop\",\"iban\":\"CZ6508000000192000145399\",\"token\":\"sim\",\"licenseKey\":\"L\",\"logoUrl\":\"\",\"pin\":\"9999\"}",
-                pinValue = "1234",
-            )
-            assertEquals(200, saved.code)
-            assertEquals(200, req(base, "GET", "/api/auth", pinValue = "9999").code)
-            assertEquals(401, req(base, "GET", "/api/auth", pinValue = "1234").code)
+            // First run: status is false.
+            assertTrue(req(base, "GET", "/api/password/status").body.contains("\"passwordSet\":false"))
 
-            // Reset requires NO PIN but only from loopback (this client is loopback).
-            val reset = req(base, "POST", "/api/pin/reset", "{}")
-            assertEquals(200, reset.code)
-            assertTrue("expected ok:true, got: ${reset.body}", reset.body.contains("\"ok\":true"))
+            // Too-short password is rejected.
+            assertEquals(400, req(base, "POST", "/api/password/setup", "{\"password\":\"12\"}").code)
 
-            // The default PIN authenticates again; the old custom PIN no longer does.
+            // Valid setup (loopback) succeeds.
+            assertEquals(200, req(base, "POST", "/api/password/setup", "{\"password\":\"1234\"}").code)
+            assertTrue(req(base, "GET", "/api/password/status").body.contains("\"passwordSet\":true"))
+
+            // A SECOND setup is forbidden once a password exists (only the unset path is allowed).
+            assertEquals(403, req(base, "POST", "/api/password/setup", "{\"password\":\"9999\"}").code)
+
+            // The first password still authenticates; the rejected one does not.
             assertEquals(200, req(base, "GET", "/api/auth", pinValue = "1234").code)
             assertEquals(401, req(base, "GET", "/api/auth", pinValue = "9999").code)
         } finally {
@@ -246,33 +264,104 @@ class ServerIntegrationTest {
     }
 
     @Test
-    fun custom_pin_replaces_default() {
-        val port = ServerSocket(0).use { it.localPort }
-        val base = "http://127.0.0.1:$port"
-        val repo = JsonSessionRepository(null)
-        val server = AppServer(AppConfig(port = port, host = "127.0.0.1", pin = "1234"), repo, ModeGateway(repo)) { null }
-        server.start()
+    fun endpoints_locked_until_password_set_then_open() {
+        val (server, base, _) = bootServer()
         try {
-            var up = false
-            for (i in 0 until 50) {
-                try { req(base, "GET", "/api/display-config"); up = true; break } catch (e: Exception) { Thread.sleep(100) }
-            }
-            assertTrue("server did not start", up)
+            // Guarded endpoints all 401 before any password exists.
+            assertEquals(401, req(base, "GET", "/api/config", pin = true).code)
+            assertEquals(401, req(base, "POST", "/api/sessions", "{\"amount\":\"10.00\"}", pin = true).code)
+            assertEquals(401, req(base, "GET", "/api/transactions/today", pin = true).code)
+            assertEquals(401, req(base, "POST", "/api/config/reset", "{}", pin = true).code)
 
-            // First-run: the default PIN (1234) is accepted; save a config (no token) with a custom PIN.
-            val saved = req(
-                base, "POST", "/api/config",
-                "{\"name\":\"Shop\",\"iban\":\"CZ6508000000192000145399\",\"logoUrl\":\"\",\"pin\":\"4321\"}",
-                pinValue = "1234",
+            // Public endpoints stay public.
+            assertEquals(200, req(base, "GET", "/api/display-config").code)
+            assertEquals(200, req(base, "GET", "/api/password/status").code)
+
+            // After setup, the password authenticates.
+            setupPassword(base)
+            assertEquals(200, req(base, "GET", "/api/config", pin = true).code)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun password_change_requires_current() {
+        val (server, base, _) = bootServer()
+        try {
+            setupPassword(base) // password = 1234
+
+            // Change requires auth (the new-password endpoint is guarded).
+            assertEquals(401, req(base, "POST", "/api/password/change", "{\"current\":\"1234\",\"new\":\"5678\"}").code)
+
+            // Wrong current -> 401.
+            assertEquals(
+                401,
+                req(base, "POST", "/api/password/change", "{\"current\":\"0000\",\"new\":\"5678\"}", pin = true).code,
             )
-            assertEquals(200, saved.code)
-            assertTrue("hasPin should be true: ${saved.body}", saved.body.contains("\"hasPin\":true"))
+            // Too-short new -> 400.
+            assertEquals(
+                400,
+                req(base, "POST", "/api/password/change", "{\"current\":\"1234\",\"new\":\"99\"}", pin = true).code,
+            )
+            // Correct current + valid new -> 200, and the new password takes effect.
+            assertEquals(
+                200,
+                req(base, "POST", "/api/password/change", "{\"current\":\"1234\",\"new\":\"5678\"}", pin = true).code,
+            )
+            assertEquals(200, req(base, "GET", "/api/auth", pinValue = "5678").code)
+            assertEquals(401, req(base, "GET", "/api/auth", pinValue = "1234").code)
+        } finally {
+            server.stop()
+        }
+    }
 
-            // The custom PIN now authenticates; the old default no longer does.
+    @Test
+    fun pin_reset_from_loopback_clears_to_first_run() {
+        // The test HTTP client connects from 127.0.0.1, so this exercises the loopback (allowed) path.
+        // The 403 remote/LAN path cannot be simulated here without a non-loopback client.
+        val (server, base, _) = bootServer()
+        try {
+            setupPassword(base) // password = 1234
+            assertEquals(200, req(base, "GET", "/api/auth", pinValue = "1234").code)
+
+            // Forgot password (loopback): clears the password back to the first-run state.
+            val reset = req(base, "POST", "/api/pin/reset", "{}")
+            assertEquals(200, reset.code)
+            assertTrue("expected ok:true, got: ${reset.body}", reset.body.contains("\"ok\":true"))
+
+            // Back to first-run: no password set; the old password no longer authenticates.
+            assertTrue(req(base, "GET", "/api/password/status").body.contains("\"passwordSet\":false"))
+            assertEquals(401, req(base, "GET", "/api/auth", pinValue = "1234").code)
+
+            // The only way forward is to create a new password again.
+            assertEquals(200, req(base, "POST", "/api/password/setup", "{\"password\":\"4321\"}").code)
+            assertEquals(200, req(base, "GET", "/api/auth", pinValue = "4321").code)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun custom_pin_replaces_setup_default() {
+        val (server, base, _) = bootServer()
+        try {
+            // Set up the mandatory password directly to a custom value.
+            setupPassword(base, "4321")
             assertEquals(200, req(base, "GET", "/api/auth", pinValue = "4321").code)
             assertEquals(401, req(base, "GET", "/api/auth", pinValue = "1234").code)
 
-            // Creating a session requires the new PIN.
+            // Configure (no tokens), and verify hasPin/passwordSet stay true across config saves.
+            val saved = req(
+                base, "POST", "/api/config",
+                "{\"name\":\"Shop\",\"iban\":\"CZ6508000000192000145399\",\"logoUrl\":\"\"}",
+                pinValue = "4321",
+            )
+            assertEquals(200, saved.code)
+            assertTrue("hasPin should stay true: ${saved.body}", saved.body.contains("\"hasPin\":true"))
+            assertTrue("passwordSet should stay true: ${saved.body}", saved.body.contains("\"passwordSet\":true"))
+
+            // Creating a session requires the password.
             assertEquals(401, req(base, "POST", "/api/sessions", "{\"amount\":\"10.00\"}", pinValue = "1234").code)
             assertEquals(201, req(base, "POST", "/api/sessions", "{\"amount\":\"10.00\"}", pinValue = "4321").code)
         } finally {
@@ -281,49 +370,91 @@ class ServerIntegrationTest {
     }
 
     @Test
-    fun token_selects_mode_and_mask_keeps_token() {
+    fun tokens_select_mode_and_mask_keeps_tokens() {
         val (server, base, _) = bootServer()
         try {
-            // A real token -> Fio mode.
+            setupPassword(base)
+            // Two real tokens -> Fio mode, tokenCount 2.
             val r1 = req(
                 base, "POST", "/api/config",
-                "{\"name\":\"Shop\",\"iban\":\"CZ6508000000192000145399\",\"token\":\"fio-secret-1234\",\"logoUrl\":\"\",\"pin\":\"\"}",
+                "{\"name\":\"Shop\",\"iban\":\"CZ6508000000192000145399\",\"tokens\":[\"fio-secret-1234\",\"fio-other-5678\"],\"logoUrl\":\"\"}",
                 pin = true,
             )
             assertEquals(200, r1.code)
             assertTrue("expected fio mode: ${r1.body}", r1.body.contains("\"mode\":\"fio\""))
+            assertTrue("expected tokenCount 2: ${r1.body}", r1.body.contains("\"tokenCount\":2"))
 
-            // Re-saving with the MASKED token (contains '*') must KEEP the real token -> still Fio.
-            val mask = field(r1.body, "tokenMasked") ?: error("no tokenMasked in ${r1.body}")
+            // Re-saving with MASKED tokens (each contains '*') must KEEP the stored tokens -> still 2, fio.
+            val masks = Regex("\"tokensMasked\":\\[([^\\]]*)\\]").find(r1.body)?.groupValues?.get(1)
+                ?: error("no tokensMasked in ${r1.body}")
             val r2 = req(
                 base, "POST", "/api/config",
-                "{\"name\":\"Shop2\",\"iban\":\"CZ6508000000192000145399\",\"token\":\"$mask\",\"logoUrl\":\"\",\"pin\":\"\"}",
+                "{\"name\":\"Shop2\",\"iban\":\"CZ6508000000192000145399\",\"tokens\":[$masks],\"logoUrl\":\"\"}",
                 pin = true,
             )
             assertEquals(200, r2.code)
-            assertTrue("mask must keep token (still fio): ${r2.body}", r2.body.contains("\"mode\":\"fio\""))
+            assertTrue("mask must keep tokens (still fio): ${r2.body}", r2.body.contains("\"mode\":\"fio\""))
+            assertTrue("mask must keep both tokens: ${r2.body}", r2.body.contains("\"tokenCount\":2"))
 
-            // An explicit empty token clears it -> simulation mode.
+            // Positional keep-by-mask: keep token[0] (mask) and add a new real token[1].
+            val firstMask = Config_maskFirst(r2.body)
             val r3 = req(
                 base, "POST", "/api/config",
-                "{\"name\":\"Shop2\",\"iban\":\"CZ6508000000192000145399\",\"token\":\"\",\"logoUrl\":\"\",\"pin\":\"\"}",
+                "{\"name\":\"Shop2\",\"iban\":\"CZ6508000000192000145399\",\"tokens\":[\"$firstMask\",\"brand-new-token\"],\"logoUrl\":\"\"}",
                 pin = true,
             )
             assertEquals(200, r3.code)
-            assertTrue("empty token -> simulace: ${r3.body}", r3.body.contains("\"mode\":\"simulace\""))
+            assertTrue("expected tokenCount 2 after keep+add: ${r3.body}", r3.body.contains("\"tokenCount\":2"))
+
+            // Empty tokens array clears them -> simulation mode.
+            val r4 = req(
+                base, "POST", "/api/config",
+                "{\"name\":\"Shop2\",\"iban\":\"CZ6508000000192000145399\",\"tokens\":[],\"logoUrl\":\"\"}",
+                pin = true,
+            )
+            assertEquals(200, r4.code)
+            assertTrue("empty tokens -> simulace: ${r4.body}", r4.body.contains("\"mode\":\"simulace\""))
+            assertTrue("empty tokens -> tokenCount 0: ${r4.body}", r4.body.contains("\"tokenCount\":0"))
+        } finally {
+            server.stop()
+        }
+    }
+
+    /** Pull the first element of the tokensMasked array out of a config response. */
+    private fun Config_maskFirst(body: String): String {
+        val inner = Regex("\"tokensMasked\":\\[([^\\]]*)\\]").find(body)?.groupValues?.get(1) ?: ""
+        return Regex("\"([^\"]*)\"").find(inner)?.groupValues?.get(1) ?: ""
+    }
+
+    @Test
+    fun config_post_does_not_set_password() {
+        val (server, base, _) = bootServer()
+        try {
+            setupPassword(base) // password = 1234
+            // A config POST that tries to smuggle a "pin" must NOT change the password.
+            val saved = req(
+                base, "POST", "/api/config",
+                "{\"name\":\"Shop\",\"iban\":\"CZ6508000000192000145399\",\"logoUrl\":\"\",\"pin\":\"9999\"}",
+                pin = true,
+            )
+            assertEquals(200, saved.code)
+            // The original password still works; the smuggled one does not.
+            assertEquals(200, req(base, "GET", "/api/auth", pinValue = "1234").code)
+            assertEquals(401, req(base, "GET", "/api/auth", pinValue = "9999").code)
         } finally {
             server.stop()
         }
     }
 
     @Test
-    fun factory_reset_clears_config() {
+    fun factory_reset_clears_config_to_first_run() {
         val (server, base, _) = bootServer()
         try {
-            // Configure with a token (fio mode).
+            setupPassword(base)
+            // Configure with tokens (fio mode).
             val saved = req(
                 base, "POST", "/api/config",
-                "{\"name\":\"Shop\",\"iban\":\"CZ6508000000192000145399\",\"token\":\"fio-x\",\"logoUrl\":\"\",\"pin\":\"\"}",
+                "{\"name\":\"Shop\",\"iban\":\"CZ6508000000192000145399\",\"tokens\":[\"fio-x\"],\"logoUrl\":\"\"}",
                 pin = true,
             )
             assertEquals(200, saved.code)
@@ -333,11 +464,9 @@ class ServerIntegrationTest {
             assertEquals(401, req(base, "POST", "/api/config/reset", "{}").code)
             assertEquals(200, req(base, "POST", "/api/config/reset", "{}", pin = true).code)
 
-            // Config is gone -> not configured, simulation mode, default PIN works again.
-            val cfg = req(base, "GET", "/api/config", pin = true)
-            assertEquals(200, cfg.code)
-            assertTrue("expected not configured: ${cfg.body}", cfg.body.contains("\"configured\":false"))
-            assertTrue("expected simulace: ${cfg.body}", cfg.body.contains("\"mode\":\"simulace\""))
+            // Config is gone -> first run: no password, endpoints locked again.
+            assertTrue(req(base, "GET", "/api/password/status").body.contains("\"passwordSet\":false"))
+            assertEquals(401, req(base, "GET", "/api/config", pin = true).code)
         } finally {
             server.stop()
         }
@@ -347,11 +476,11 @@ class ServerIntegrationTest {
     fun today_excludes_simulated_payments() {
         val (server, base, _) = bootServer()
         try {
-            // No token -> simulation; create a session and let the sim auto-confirm it.
+            // No tokens -> simulation; create a session and let the sim auto-confirm it.
             configure(base)
             val created = req(base, "POST", "/api/sessions", "{\"amount\":\"50.00\"}", pin = true)
             assertEquals(201, created.code)
-            server.matching.tick() // sim emits a "sim-..." transaction and pays the session
+            server.matching.forceCheck() // sim emits a "sim-..." transaction and pays the session
 
             // The session is PAID, but the simulated transaction must NOT appear in today's list.
             val today = req(base, "GET", "/api/transactions/today", pin = true)

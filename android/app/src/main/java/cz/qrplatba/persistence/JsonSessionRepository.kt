@@ -47,7 +47,14 @@ class JsonSessionRepository(private val file: File?) : SessionRepository {
             }
             txs.clear()
             for (t in data.transactions) txs[t.externalId] = t
-            config = data.config
+            // Migrate legacy single-token configs: fold `token` into `tokens` and drop the
+            // legacy field so persisted state is clean going forward.
+            config = data.config?.let { c ->
+                val migrated = c.normalizedTokens()
+                if (c.legacyToken != null || c.tokens != migrated) {
+                    c.copy(tokens = migrated, legacyToken = null)
+                } else c
+            }
         }
     }
 

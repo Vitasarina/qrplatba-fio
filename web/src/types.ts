@@ -26,18 +26,24 @@ export interface Session {
   matchedTxId?: string | null
 }
 
-// Operating mode reported by the backend. Empty token ⇒ "simulace" (payments
-// auto-confirm); a present Fio token ⇒ "fio" (real bank verification).
+// Operating mode reported by the backend. No tokens ⇒ "simulace" (payments
+// auto-confirm); at least one Fio token ⇒ "fio" (real bank verification).
 export type AppMode = 'simulace' | 'fio'
 
 export interface AppConfig {
   name: string
   iban: string
-  tokenMasked: string // masked token returned by the backend (never the raw secret)
+  // Masked Fio tokens already stored on the backend (never the raw secrets).
+  // One entry per configured token; up to 32.
+  tokensMasked: string[]
+  tokenCount: number
   logoUrl: string
-  hasPin?: boolean // whether a custom operator PIN is set (PIN itself never returned)
+  passwordSet: boolean // whether the settings password has been created
   configured?: boolean
   mode?: AppMode
+  // Whether the display is rotated 180° (operator/customer stand on swapped
+  // sides of the flat phone). See DisplayConfig.flipped.
+  flipped: boolean
 }
 
 // Public display info (no secrets), served without a PIN.
@@ -45,6 +51,11 @@ export interface DisplayConfig {
   name: string
   logoUrl: string
   mode?: AppMode
+  // Which side faces the customer. The phone lies flat between operator and
+  // customer; customer-facing and operator-facing screens are oriented 180°
+  // apart. `flipped` swaps which orientation each gets. Default (false):
+  // customer screens at 180°, the operator numpad at 0°.
+  flipped?: boolean
 }
 
 // LAN address of the device running the server (for the admin/access screen).

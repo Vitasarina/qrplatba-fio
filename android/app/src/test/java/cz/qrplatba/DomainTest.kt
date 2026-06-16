@@ -46,29 +46,68 @@ class DomainTest {
     }
 
     @Test fun configAcceptsCzechAccountNumber() {
-        val c = Config.validate("Shop", "19-2000145399/0800", "", null, null, null)
+        val c = Config.validate("Shop", "19-2000145399/0800", emptyList(), null, null, null)
         assertEquals(VALID_IBAN, c.iban)
     }
 
     @Test(expected = ConfigError::class) fun rejectsInvalidAccountNumber() {
-        Config.validate("Shop", "not-an-account", "", null, null, null)
+        Config.validate("Shop", "not-an-account", emptyList(), null, null, null)
     }
 
-    // ---- mode derived from token ----
-    @Test fun modeSimulationWhenTokenBlank() {
-        val c = Config.validate("Shop", VALID_IBAN, "", null, null, null)
+    // ---- mode derived from tokens ----
+    @Test fun modeSimulationWhenNoTokens() {
+        val c = Config.validate("Shop", VALID_IBAN, emptyList(), null, null, null)
         assertEquals("simulace", Config.toDTO(c).mode)
     }
 
-    @Test fun modeFioWhenTokenPresent() {
-        val c = Config.validate("Shop", VALID_IBAN, "tok", null, null, null)
+    @Test fun modeFioWhenTokensPresent() {
+        val c = Config.validate("Shop", VALID_IBAN, listOf("tok"), null, null, null)
         assertEquals("fio", Config.toDTO(c).mode)
     }
 
-    @Test fun configuredWithoutTokenOrLicense() {
-        // Name + valid account is enough; token and license are optional now.
-        val c = Config.validate("Shop", VALID_IBAN, "", "", null, null)
+    @Test fun configuredWithoutTokensOrLicense() {
+        // Name + valid account is enough; tokens and license are optional now.
+        val c = Config.validate("Shop", VALID_IBAN, emptyList(), "", null, null)
         assertTrue(Config.isConfigured(c))
+    }
+
+    // ---- multiple tokens ----
+    @Test fun tokensTrimmedAndBlankDropped() {
+        val c = Config.validate("Shop", VALID_IBAN, listOf("  a  ", "", "   ", "b"), null, null, null)
+        assertEquals(listOf("a", "b"), c.tokens)
+        assertEquals(2, Config.toDTO(c).tokenCount)
+        assertEquals("fio", Config.toDTO(c).mode)
+    }
+
+    @Test fun tokensCappedAt32() {
+        val many = (1..40).map { "tok$it" }
+        val c = Config.validate("Shop", VALID_IBAN, many, null, null, null)
+        assertEquals(32, c.tokens.size)
+        assertEquals(32, Config.toDTO(c).tokenCount)
+    }
+
+    @Test fun tokensMaskedInDto() {
+        val c = Config.validate("Shop", VALID_IBAN, listOf("secret-token-abcdef", "abcd"), null, null, null)
+        val dto = Config.toDTO(c)
+        assertEquals(listOf("***************cdef", "****"), dto.tokensMasked)
+    }
+
+    @Test fun legacySingleTokenMigratesToList() {
+        // Old persisted shape: a single `token` string, no `tokens` array.
+        val legacy = cz.qrplatba.domain.MerchantConfig(
+            name = "Shop", iban = VALID_IBAN, tokens = emptyList(), legacyToken = "old-tok",
+        )
+        assertEquals(listOf("old-tok"), legacy.normalizedTokens())
+        assertEquals("fio", Config.modeOf(legacy))
+        assertEquals(1, Config.toDTO(legacy).tokenCount)
+    }
+
+    @Test fun passwordSetReflectsPin() {
+        val noPw = Config.validate("Shop", VALID_IBAN, emptyList(), null, null, null)
+        assertFalse(Config.toDTO(noPw).passwordSet)
+        val withPw = Config.validate("Shop", VALID_IBAN, emptyList(), null, null, "4321")
+        assertTrue(Config.toDTO(withPw).passwordSet)
+        assertTrue(Config.toDTO(withPw).hasPin)
     }
 
     // ---- SPAYD (AC-3.4) ----
@@ -134,11 +173,11 @@ class DomainTest {
     @Test fun masksShortFully() = assertEquals("****", Config.maskToken("abcd"))
 
     // ---- config validation ----
-    @Test(expected = ConfigError::class) fun rejectsInvalidIban() { Config.validate("x", "bad", "t", "l", null, null) }
-    @Test(expected = ConfigError::class) fun rejectsEmptyName() { Config.validate("  ", VALID_IBAN, "t", "l", null, null) }
+    @Test(expected = ConfigError::class) fun rejectsInvalidIban() { Config.validate("x", "bad", listOf("t"), "l", null, null) }
+    @Test(expected = ConfigError::class) fun rejectsEmptyName() { Config.validate("  ", VALID_IBAN, listOf("t"), "l", null, null) }
 
     @Test fun normalizesValidConfig() {
-        val c = Config.validate(" Shop ", "CZ65 0800 0000 1920 0014 5399", "t", "l", null, null)
+        val c = Config.validate(" Shop ", "CZ65 0800 0000 1920 0014 5399", listOf("t"), "l", null, null)
         assertEquals("Shop", c.name)
         assertEquals(VALID_IBAN, c.iban)
     }

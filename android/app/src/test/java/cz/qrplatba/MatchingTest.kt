@@ -2,6 +2,7 @@ package cz.qrplatba
 
 import cz.qrplatba.domain.SessionStatus
 import cz.qrplatba.domain.money
+import cz.qrplatba.gateway.ModeGateway
 import cz.qrplatba.gateway.ScenarioType
 import cz.qrplatba.gateway.SimulatorGateway
 import cz.qrplatba.persistence.JsonSessionRepository
@@ -26,7 +27,7 @@ class MatchingTest {
         val matching = MatchingService(repo, gateway, events)
 
         fun configure() {
-            sessions.setConfig("Test Shop", VALID_IBAN, "secret-token-abcdef", "LIC-12345", null, null)
+            sessions.setConfig("Test Shop", VALID_IBAN, listOf("secret-token-abcdef"), "LIC-12345", null)
         }
     }
 
@@ -35,7 +36,7 @@ class MatchingTest {
         val s = h.sessions.createSession("450.00")
         assertEquals(SessionStatus.PENDING, s.status)
         val tx = h.gateway.scenario(ScenarioType.exact, s.vs, s.amount)[0]
-        h.matching.tick()
+        h.matching.forceCheck()
         val after = h.sessions.getSession(s.id)
         assertEquals(SessionStatus.PAID, after.status)
         assertNotNull(after.paidAt)
@@ -47,10 +48,10 @@ class MatchingTest {
         val h = Harness(); h.configure()
         val s = h.sessions.createSession("100.00")
         h.gateway.scenario(ScenarioType.exact, s.vs, s.amount)
-        h.matching.tick()
+        h.matching.forceCheck()
         val firstTxId = h.sessions.getSession(s.id).matchedTxId
         h.gateway.enqueue(s.amount, s.vs)
-        h.matching.tick()
+        h.matching.forceCheck()
         val still = h.sessions.getSession(s.id)
         assertEquals(SessionStatus.PAID, still.status)
         assertEquals(firstTxId, still.matchedTxId)
@@ -63,7 +64,7 @@ class MatchingTest {
         val h = Harness(); h.configure()
         val s = h.sessions.createSession("450.00")
         h.gateway.scenario(ScenarioType.under, s.vs, s.amount)
-        h.matching.tick()
+        h.matching.forceCheck()
         val after = h.sessions.getSession(s.id)
         assertEquals(SessionStatus.UNDERPAID, after.status)
         assertNull(after.paidAt)
@@ -74,7 +75,7 @@ class MatchingTest {
         val h = Harness(); h.configure()
         val s = h.sessions.createSession("450.00")
         h.gateway.scenario(ScenarioType.over, s.vs, s.amount)
-        h.matching.tick()
+        h.matching.forceCheck()
         val after = h.sessions.getSession(s.id)
         assertEquals(SessionStatus.OVERPAID, after.status)
         assertTrue(after.overpaid)
@@ -86,7 +87,7 @@ class MatchingTest {
         val h = Harness(ttlMs = 10); h.configure()
         val s = h.sessions.createSession("50.00")
         Thread.sleep(30)
-        h.matching.tick()
+        h.matching.forceCheck()
         assertEquals(SessionStatus.EXPIRED, h.sessions.getSession(s.id).status)
     }
 
@@ -94,10 +95,10 @@ class MatchingTest {
         val h = Harness(ttlMs = 10); h.configure()
         val s = h.sessions.createSession("50.00")
         Thread.sleep(30)
-        h.matching.tick()
+        h.matching.forceCheck()
         assertEquals(SessionStatus.EXPIRED, h.sessions.getSession(s.id).status)
         h.gateway.scenario(ScenarioType.late, s.vs, s.amount)
-        h.matching.tick()
+        h.matching.forceCheck()
         assertEquals(SessionStatus.EXPIRED, h.sessions.getSession(s.id).status)
         val txs = h.repo.listTransactions()
         assertEquals(1, txs.size)
@@ -110,7 +111,7 @@ class MatchingTest {
         val s = h.sessions.createSession("50.00")
         assertEquals(SessionStatus.CANCELLED, h.sessions.cancelSession(s.id).status)
         h.gateway.enqueue(s.amount, s.vs)
-        h.matching.tick()
+        h.matching.forceCheck()
         assertEquals(SessionStatus.CANCELLED, h.sessions.getSession(s.id).status)
     }
 
@@ -118,7 +119,7 @@ class MatchingTest {
         val h = Harness(); h.configure()
         val s = h.sessions.createSession("200.00")
         h.gateway.scenario(ScenarioType.duplicate, s.vs, s.amount)
-        h.matching.tick()
+        h.matching.forceCheck()
         assertEquals(SessionStatus.PAID, h.sessions.getSession(s.id).status)
         val txs = h.repo.listTransactions()
         assertEquals(2, txs.size)
@@ -132,7 +133,7 @@ class MatchingTest {
         val h = Harness(); h.configure()
         val s = h.sessions.createSession("75.00")
         h.gateway.enqueue(money("75.00"), "9999999999")
-        h.matching.tick()
+        h.matching.forceCheck()
         assertEquals(SessionStatus.PENDING, h.sessions.getSession(s.id).status)
         val txs = h.repo.listTransactions()
         assertEquals(1, txs.size)
@@ -145,12 +146,12 @@ class MatchingTest {
         val s = h.sessions.createSession("300.00")
         h.gateway.enqueue(s.amount, s.vs)
         h.gateway.setAvailable(false)
-        h.matching.tick()
+        h.matching.forceCheck()
         var after = h.sessions.getSession(s.id)
         assertEquals(SessionStatus.UNKNOWN, after.status)
         assertNull(after.matchedTxId)
         h.gateway.setAvailable(true)
-        h.matching.tick()
+        h.matching.forceCheck()
         after = h.sessions.getSession(s.id)
         assertEquals(SessionStatus.PAID, after.status)
     }
@@ -169,10 +170,10 @@ class MatchingTest {
         val h = Harness(); h.configure()
         val s = h.sessions.createSession("120.00")
         h.gateway.enqueue(s.amount, s.vs, externalId = "fixed-1")
-        h.matching.tick()
+        h.matching.forceCheck()
         assertEquals(SessionStatus.PAID, h.sessions.getSession(s.id).status)
         h.gateway.enqueue(s.amount, s.vs, externalId = "fixed-1")
-        h.matching.tick()
+        h.matching.forceCheck()
         assertEquals(1, h.repo.listTransactions().size)
     }
 
@@ -180,7 +181,114 @@ class MatchingTest {
         val h = Harness(); h.configure()
         val s = h.sessions.createSession("0.30")
         h.gateway.enqueue(money("0.1").add(money("0.2")), s.vs)
-        h.matching.tick()
+        h.matching.forceCheck()
         assertEquals(SessionStatus.PAID, h.sessions.getSession(s.id).status)
+    }
+
+    // ---- polling cadence (driven by a controllable `now`) ----
+
+    /** A gateway that just counts fetch calls; lets us assert exactly when a query happens. */
+    private class CountingGateway : cz.qrplatba.gateway.BankGateway {
+        var fetches = 0
+        override fun fetchNewTransactions(): List<cz.qrplatba.gateway.BankTransaction> { fetches++; return emptyList() }
+        override fun isAvailable() = true
+    }
+
+    /** Builds a harness whose config has [n] tokens, with a counting gateway and a fixed createdAt. */
+    private class CadenceHarness(n: Int) {
+        val repo = JsonSessionRepository(null)
+        val events = EventBus()
+        val gateway = CountingGateway()
+        val sessions = SessionService(repo, events, 60L * 60 * 1000) // long TTL so it doesn't expire
+        val matching = MatchingService(repo, gateway, events)
+        init {
+            val tokens = (1..n).map { "tok$it" }
+            sessions.setConfig("Shop", VALID_IBAN, tokens, "", null)
+        }
+    }
+
+    @Test fun cadenceSingleTokenFirstQueryAt30s() {
+        val h = CadenceHarness(1)
+        val s = h.sessions.createSession("10.00")
+        val t0 = s.createdAt
+        // Before +30 s: no query.
+        h.matching.tick(t0)
+        h.matching.tick(t0 + 29_999)
+        assertEquals(0, h.gateway.fetches)
+        // At +30 s: first query fires.
+        h.matching.tick(t0 + 30_000)
+        assertEquals(1, h.gateway.fetches)
+        // Then every 30 s.
+        h.matching.tick(t0 + 45_000)
+        assertEquals(1, h.gateway.fetches) // not yet (last query at +30s, interval 30s)
+        h.matching.tick(t0 + 60_000)
+        assertEquals(2, h.gateway.fetches)
+    }
+
+    @Test fun cadenceMultiTokenFirstAt10sThenInterval() {
+        val n = 3
+        val h = CadenceHarness(n)
+        val s = h.sessions.createSession("10.00")
+        val t0 = s.createdAt
+        // N>1: first query at +10 s.
+        h.matching.tick(t0 + 9_999)
+        assertEquals(0, h.gateway.fetches)
+        h.matching.tick(t0 + 10_000)
+        assertEquals(1, h.gateway.fetches)
+        // Then every 30000/N ms = 10000 ms (last query at +10000 -> next due +20000).
+        h.matching.tick(t0 + 19_999)
+        assertEquals(1, h.gateway.fetches)
+        h.matching.tick(t0 + 20_000)
+        assertEquals(2, h.gateway.fetches)
+        h.matching.tick(t0 + 30_000)
+        assertEquals(3, h.gateway.fetches)
+    }
+
+    @Test fun cadenceIntervalForManyTokens() {
+        // 30000 / N for a few N values.
+        val h2 = CadenceHarness(2); assertEquals(15_000L, h2.matching.pollIntervalMs())
+        val h5 = CadenceHarness(5); assertEquals(6_000L, h5.matching.pollIntervalMs())
+        val h1 = CadenceHarness(1); assertEquals(30_000L, h1.matching.pollIntervalMs())
+    }
+
+    @Test fun cadenceNoQueryWithoutOpenSession() {
+        val h = CadenceHarness(1)
+        // No sessions at all: ticking never queries.
+        h.matching.tick(System.currentTimeMillis() + 60_000)
+        assertEquals(0, h.gateway.fetches)
+    }
+
+    @Test fun cadenceManualCheckCountsAsQueryForTiming() {
+        val h = CadenceHarness(1)
+        val s = h.sessions.createSession("10.00")
+        val t0 = s.createdAt
+        // Force a check well before the +30 s first-query point.
+        h.matching.forceCheck(t0 + 5_000)
+        assertEquals(1, h.gateway.fetches)
+        // Because the manual check counted as a query (lastQueryAt = t0+5000), the next
+        // scheduled query is now lastQueryAt + interval (30 s), not the +30s-from-createdAt point.
+        h.matching.tick(t0 + 30_000)
+        assertEquals(1, h.gateway.fetches) // 30000+5000 = 35000 not yet due
+        h.matching.tick(t0 + 35_000)
+        assertEquals(2, h.gateway.fetches)
+    }
+
+    @Test fun cadenceSimAutoConfirmsAfterDelayNotInstant() {
+        // N == 0 (simulation): the open session is auto-confirmed ~9 s after createdAt, not instantly.
+        val repo = JsonSessionRepository(null)
+        val events = EventBus()
+        val gateway = ModeGateway(repo)
+        val sessions = SessionService(repo, events, 60L * 60 * 1000)
+        val matching = MatchingService(repo, gateway, events)
+        sessions.setConfig("Shop", VALID_IBAN, emptyList(), "", null)
+        val s = sessions.createSession("10.00")
+        val t0 = s.createdAt
+        // Right away: still PENDING (QR must be visible briefly).
+        matching.tick(t0)
+        matching.tick(t0 + 5_000)
+        assertEquals(SessionStatus.PENDING, sessions.getSession(s.id).status)
+        // After ~9 s: auto-confirmed.
+        matching.tick(t0 + 9_000)
+        assertEquals(SessionStatus.PAID, sessions.getSession(s.id).status)
     }
 }

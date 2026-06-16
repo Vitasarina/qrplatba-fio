@@ -4,6 +4,8 @@ import cz.qrplatba.api.Csv
 import cz.qrplatba.api.Qr
 import cz.qrplatba.domain.AmountError
 import cz.qrplatba.domain.ConfigError
+import cz.qrplatba.domain.MAX_TOKENS
+import cz.qrplatba.domain.MerchantConfig
 import cz.qrplatba.domain.isOpen
 import cz.qrplatba.domain.toDTO
 import cz.qrplatba.gateway.BankGateway
@@ -41,6 +43,7 @@ import io.ktor.server.routing.routing
 import io.ktor.utils.io.writeStringUtf8
 import kotlinx.coroutines.channels.Channel
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -52,8 +55,9 @@ import kotlinx.serialization.json.put
 data class AppConfig(
     val port: Int = 8080,
     val host: String = "0.0.0.0",
-    val pin: String = "1234",
-    val pollIntervalMs: Long = 30000,
+    /** Scheduler tick interval. The poller ticks frequently and decides per tick whether a
+     *  bank query is due (smart cadence lives in MatchingService). 1 s by default. */
+    val pollIntervalMs: Long = 1000,
     val sessionTtlMs: Long = 5 * 60 * 1000,
     val simEnabled: Boolean = true,
 )
@@ -101,16 +105,31 @@ class AppServer(
 
     // ---------- helpers ----------
 
-    /** Effective PIN: the merchant-set PIN once configured, otherwise the bootstrap default. */
-    private fun effectivePin(): String =
-        repo.getConfig()?.pin?.takeIf { it.isNotBlank() } ?: config.pin
+    /** Minimum length for the mandatory settings password. */
+    private val minPasswordLen = 4
 
+    /** The stored operator password. Empty string = NOT set (first-run, no default). */
+    private fun storedPassword(): String = repo.getConfig()?.pin.orEmpty()
+
+    /** Whether the mandatory settings password has been created. */
+    private fun passwordSet(): Boolean = storedPassword().isNotBlank()
+
+    /**
+     * Guard for operator/config endpoints. There is NO default password: when none is set
+     * (first run) EVERY guarded endpoint is rejected (401) — the only way forward is to
+     * create one via POST /api/password/setup. Once set, requires x-pin == stored password.
+     */
     private suspend fun ApplicationCall.requirePin(): Boolean {
+        val stored = storedPassword()
+        if (stored.isBlank()) {
+            respond(HttpStatusCode.Unauthorized, mapOf("error" to "unauthorized", "message" to "password not set"))
+            return false
+        }
         val header = request.headers["x-pin"]
         val cookie = request.cookies["pin"]
         val supplied = header ?: cookie
-        if (supplied != effectivePin()) {
-            respond(HttpStatusCode.Unauthorized, mapOf("error" to "unauthorized", "message" to "valid PIN required"))
+        if (supplied != stored) {
+            respond(HttpStatusCode.Unauthorized, mapOf("error" to "unauthorized", "message" to "valid password required"))
             return false
         }
         return true
@@ -150,6 +169,47 @@ class AppServer(
             return v.contentOrNull // numeric/boolean literal text
         }
         return null
+    }
+
+    private fun JsonObject.bool(key: String): Boolean? {
+        val p = this[key] as? JsonPrimitive ?: return null
+        return p.content.toBooleanStrictOrNull()
+    }
+
+    /**
+     * Extract a JSON string array (e.g. body field `tokens`). Returns null when the key is
+     * absent, an empty list when present-but-empty. Non-string elements are coerced to their
+     * literal text; nulls are dropped.
+     */
+    private fun JsonObject.strList(key: String): List<String>? {
+        val v = this[key] ?: return null
+        val arr = v as? JsonArray ?: return null
+        return arr.mapNotNull { el ->
+            val p = el as? JsonPrimitive ?: return@mapNotNull null
+            if (p.isString) p.content else p.contentOrNull
+        }
+    }
+
+    /**
+     * Apply the positional keep-by-mask rule to an incoming `tokens` array against the
+     * currently stored tokens. For index i: a value containing '*' (a mask) keeps the
+     * stored token at position i (if any); a non-blank real value is used as-is; blank is
+     * dropped. The result is capped at MAX_TOKENS. This lets the UI render masked existing
+     * tokens and only type genuinely new ones.
+     */
+    private fun resolveTokens(incoming: List<String>): List<String> {
+        val stored = repo.getConfig()?.normalizedTokens() ?: emptyList()
+        val out = ArrayList<String>()
+        for ((i, raw) in incoming.withIndex()) {
+            val v = raw.trim()
+            when {
+                v.isEmpty() -> { /* drop */ }
+                v.contains('*') -> stored.getOrNull(i)?.let { out.add(it) }
+                else -> out.add(v)
+            }
+            if (out.size >= MAX_TOKENS) break
+        }
+        return out
     }
 
     /** First site-local IPv4 (e.g. 192.168.x.x) so the admin screen can show a URL other devices can reach. */
@@ -216,19 +276,15 @@ class AppServer(
             if (!call.requirePin()) return@post
             try {
                 val b = call.parseBody()
-                // Token "keep" rule: the GET only returns the token masked, so the UI
-                // re-sends the mask (contains '*') or omits it (null) to mean "keep the
-                // current token". An explicit empty string "" clears it (-> simulation).
-                // Never store a masked value as if it were the real token.
-                val rawToken = b.str("token")
-                val token = if (rawToken == null || rawToken.contains('*')) {
-                    repo.getConfig()?.token ?: ""
-                } else {
-                    rawToken
-                }
+                // Tokens keep-by-mask rule: the GET returns each token masked, so the UI
+                // re-sends masks (contain '*') to keep stored tokens at that position and
+                // real values for new ones. Blank entries are dropped. Capped at MAX_TOKENS.
+                // The password is NOT accepted here — it is managed via the password endpoints.
+                val incoming = b.strList("tokens") ?: emptyList()
+                val tokens = resolveTokens(incoming)
                 val dto = sessions.setConfig(
-                    b.str("name"), b.str("iban"), token,
-                    b.str("licenseKey"), b.str("logoUrl"), b.str("pin"),
+                    b.str("name"), b.str("iban"), tokens,
+                    b.str("licenseKey"), b.str("logoUrl"), b.bool("flipped"),
                 )
                 call.respond(dto)
             } catch (e: Throwable) {
@@ -306,7 +362,8 @@ class AppServer(
             try {
                 // 404 fast if the session doesn't exist (before doing a poll cycle).
                 sessions.getSession(id)
-                matching.tick()
+                // Manual check forces an immediate bank query (counts toward cadence timing).
+                matching.forceCheck()
                 call.respond(sessions.getSession(id).toDTO())
             } catch (e: Throwable) {
                 call.sendError(e)
@@ -330,14 +387,73 @@ class AppServer(
             call.respond(list)
         }
 
-        // ---- PIN reset (device-only recovery; loopback origin enforced) ----
+        // ---- password status (PUBLIC): lets the UI choose "create" vs "enter" password ----
+        get("/api/password/status") {
+            call.respond(buildJsonObject { put("passwordSet", passwordSet()) })
+        }
+
+        // ---- password setup (device-only, first-run only): create the mandatory password ----
+        post("/api/password/setup") {
+            // Loopback-only: physical possession of the device is the auth factor here.
+            if (!call.isLoopback()) {
+                call.respond(HttpStatusCode.Forbidden, buildJsonObject { put("error", "forbidden") })
+                return@post
+            }
+            // Only allowed while no password is set; otherwise it is not the bootstrap path.
+            if (passwordSet()) {
+                call.respond(HttpStatusCode.Forbidden, buildJsonObject {
+                    put("error", "forbidden"); put("message", "password already set")
+                })
+                return@post
+            }
+            val b = call.parseBody()
+            val pw = (b.str("password") ?: "").trim()
+            if (pw.length < minPasswordLen) {
+                call.respond(HttpStatusCode.BadRequest, buildJsonObject {
+                    put("error", "bad_request"); put("message", "heslo musí mít alespoň $minPasswordLen znaky")
+                })
+                return@post
+            }
+            // Persist the password; create a minimal config row if none exists yet.
+            val cur = repo.getConfig()
+            if (cur == null) {
+                repo.setConfig(MerchantConfig(name = "", iban = "", tokens = emptyList(), pin = pw))
+            } else {
+                repo.setConfig(cur.copy(pin = pw, legacyToken = null))
+            }
+            call.respond(buildJsonObject { put("ok", true) })
+        }
+
+        // ---- password change (operator-authenticated; requires current as defense) ----
+        post("/api/password/change") {
+            if (!call.requirePin()) return@post
+            val b = call.parseBody()
+            val current = (b.str("current") ?: "")
+            val next = (b.str("new") ?: "").trim()
+            if (current != storedPassword()) {
+                call.respond(HttpStatusCode.Unauthorized, buildJsonObject {
+                    put("error", "unauthorized"); put("message", "current password mismatch")
+                })
+                return@post
+            }
+            if (next.length < minPasswordLen) {
+                call.respond(HttpStatusCode.BadRequest, buildJsonObject {
+                    put("error", "bad_request"); put("message", "heslo musí mít alespoň $minPasswordLen znaky")
+                })
+                return@post
+            }
+            repo.getConfig()?.let { repo.setConfig(it.copy(pin = next, legacyToken = null)) }
+            call.respond(buildJsonObject { put("ok", true) })
+        }
+
+        // ---- forgot password (device-only recovery; loopback origin enforced) ----
+        // Clears the password (pin="") -> returns to first-run "create password" state.
         post("/api/pin/reset") {
             if (!call.isLoopback()) {
                 call.respond(HttpStatusCode.Forbidden, buildJsonObject { put("error", "forbidden") })
                 return@post
             }
-            // Reset the stored PIN to empty so effectivePin() falls back to the default.
-            repo.getConfig()?.let { repo.setConfig(it.copy(pin = "")) }
+            repo.getConfig()?.let { repo.setConfig(it.copy(pin = "", legacyToken = null)) }
             call.respond(buildJsonObject { put("ok", true) })
         }
 

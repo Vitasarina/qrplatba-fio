@@ -42,13 +42,13 @@ export function AdminPage() {
 
           <AccessCard
             title="Nastavení — vše nastavíš tady"
-            desc="Název, IBAN, API token (Fio), licenční klíč, PIN obsluhy a logo. Token se uloží do telefonu a nikam neodchází."
+            desc="Název, IBAN, tokeny banky (Fio), heslo pro přístup a logo. Tokeny se uloží do telefonu a nikam neodchází."
             url={`${base}/setup`}
             onOpen={() => navigate('/setup')}
           />
           <AccessCard
             title="Zadávání plateb (obsluha)"
-            desc="Stránka, kde obsluha zadává částky. Přístup chrání PIN nastavený v Nastavení."
+            desc="Stránka, kde obsluha zadává částky. Přístup chrání heslo nastavené v Nastavení."
             url={`${base}/operator`}
             onOpen={() => navigate('/operator')}
           />
@@ -59,8 +59,9 @@ export function AdminPage() {
   )
 }
 
-// Recovery for a forgotten operator PIN. Only works when triggered directly on
-// the device (the backend rejects remote calls with HTTP 403).
+// Recovery for a forgotten settings password. Clears the password back to
+// first-run; only works when triggered directly on the device (the backend
+// rejects remote calls with HTTP 403).
 function ResetPinCard() {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
@@ -72,14 +73,15 @@ function ResetPinCard() {
     setError(null)
     try {
       await api.resetPin()
-      // Drop any stale/forgotten PIN held locally so the next login uses 1234.
+      // Drop any stale/forgotten password held locally; a new one is created on
+      // the next entry to settings.
       setPin('')
-      setMsg('PIN byl obnoven na výchozí 1234.')
+      setMsg('Heslo bylo smazáno. Při dalším vstupu do nastavení vytvoříte nové.')
     } catch (e) {
       if (e instanceof ApiError && e.status === 403) {
-        setError('Obnovu PINu lze provést jen přímo na zařízení (v telefonu), ne vzdáleně.')
+        setError('Obnovu hesla lze provést jen přímo na zařízení (v telefonu), ne vzdáleně.')
       } else {
-        setError(e instanceof ApiError ? e.message : 'Obnova PINu se nezdařila.')
+        setError(e instanceof ApiError ? e.message : 'Obnova hesla se nezdařila.')
       }
     } finally {
       setBusy(false)
@@ -88,17 +90,17 @@ function ResetPinCard() {
 
   return (
     <div className="card admin-card">
-      <h2 style={{ margin: '0 0 0.25rem' }}>Zapomenutý PIN</h2>
+      <h2 style={{ margin: '0 0 0.25rem' }}>Zapomenuté heslo</h2>
       <p className="muted" style={{ marginTop: 0 }}>
-        Pokud jste zapomněli PIN obsluhy, můžete ho zde obnovit na výchozí hodnotu
-        1234. Z bezpečnostních důvodů to jde jen přímo na tomto zařízení (v telefonu),
-        ne přes vzdálený přístup.
+        Pokud jste zapomněli heslo pro přístup, můžete ho zde smazat. Při dalším vstupu do nastavení
+        vytvoříte nové. Z bezpečnostních důvodů to jde jen přímo na tomto zařízení (v telefonu), ne
+        přes vzdálený přístup.
       </p>
       {msg && <div className="banner success">{msg}</div>}
       {error && <div className="banner error">{error}</div>}
       <button type="button" className="btn danger" onClick={handleReset} disabled={busy}>
         {busy ? <span className="spinner" aria-hidden /> : null}
-        {busy ? 'Obnovuji…' : 'Obnovit PIN (jen na tomto zařízení)'}
+        {busy ? 'Obnovuji…' : 'Obnovit heslo (jen na tomto zařízení)'}
       </button>
     </div>
   )

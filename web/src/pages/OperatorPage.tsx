@@ -58,7 +58,7 @@ export function OperatorPage() {
       return
     }
     if (!getPin()) {
-      setError('Nejprve nastavte PIN obsluhy (tlačítko vpravo nahoře).')
+      setError('Přístup vypršel. Načtěte stránku znovu a zadejte heslo.')
       return
     }
 

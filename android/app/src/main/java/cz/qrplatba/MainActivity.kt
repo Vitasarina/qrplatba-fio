@@ -7,7 +7,6 @@ import android.view.WindowManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 
@@ -31,8 +30,10 @@ class MainActivity : AppCompatActivity() {
         ServerService.start(this)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        // Immersive fullscreen kiosk: hide status + navigation bars.
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Immersive fullscreen kiosk: hide status + navigation bars. We do NOT use
+        // edge-to-edge (setDecorFitsSystemWindows=false) because it stops the window
+        // from resizing for the soft keyboard; with the default fit + adjustResize the
+        // window shrinks when the keyboard opens, keeping focused inputs visible.
         hideSystemBars()
 
         val webView = WebView(this).apply {

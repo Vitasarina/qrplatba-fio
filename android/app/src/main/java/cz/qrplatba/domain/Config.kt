@@ -1,35 +1,67 @@
 package cz.qrplatba.domain
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 class ConfigError(message: String) : Exception(message)
 
-/** Merchant config. Token stored as-is here (simulator phase). */
+/** Maximum number of Fio tokens an operator may configure. */
+const val MAX_TOKENS = 32
+
+/**
+ * Merchant config. Tokens stored as-is here (read-only Fio API tokens).
+ *
+ * Backward compatibility: older persisted configs carried a single `token` string.
+ * The legacy field is still accepted on deserialization via [legacyToken]; it is
+ * folded into [tokens] by [normalizedTokens]/the repository migration. It is NOT
+ * serialized back out (only `tokens` is written going forward).
+ */
 @Serializable
 data class MerchantConfig(
     val name: String,
     val iban: String,
-    val token: String,
-    val licenseKey: String,
+    /** Fio API tokens (0..MAX_TOKENS). Empty => simulation mode. */
+    val tokens: List<String> = emptyList(),
+    val licenseKey: String = "",
     val logoUrl: String = "",
-    /** Operator PIN guarding the API. Empty = not set yet (server falls back to the default). */
+    /** Operator password guarding the API. Empty = NOT set (first-run state, no default). */
     val pin: String = "",
-)
+    /** Display rotated 180° toggle: which side the customer-facing screens face. */
+    val flipped: Boolean = false,
+    /** Legacy single-token field from old persisted configs; migrated into [tokens]. */
+    @SerialName("token") val legacyToken: String? = null,
+) {
+    /**
+     * The effective token list: explicit [tokens] if present, otherwise the migrated
+     * legacy single [legacyToken] (when non-blank). Always trimmed/non-blank/capped.
+     */
+    fun normalizedTokens(): List<String> {
+        val base = if (tokens.isNotEmpty()) tokens else listOfNotNull(legacyToken)
+        return base.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_TOKENS)
+    }
+}
 
-/** Config DTO (PIN-protected) — token is masked, never the raw secret. */
+/** Config DTO (password-protected) — tokens are masked, never the raw secrets. */
 @Serializable
 data class ConfigDTO(
     val name: String,
     val iban: String,
-    val tokenMasked: String,
+    /** Each configured token, masked. Length == tokenCount. */
+    val tokensMasked: List<String>,
+    /** Number of configured tokens (0..MAX_TOKENS). */
+    val tokenCount: Int,
     val licenseKey: String,
     val logoUrl: String,
     val configured: Boolean,
     val licensed: Boolean,
-    /** Operating mode derived from the token: "simulace" (blank) or "fio" (token set). */
+    /** Operating mode derived from the tokens: "simulace" (none) or "fio" (>=1). */
     val mode: String,
-    /** Whether a custom operator PIN has been set (the PIN itself is never returned). */
+    /** Whether a custom operator password has been set (the password itself is never returned). */
     val hasPin: Boolean,
+    /** Whether the mandatory settings password has been created (alias of hasPin; first-run gate). */
+    val passwordSet: Boolean,
+    /** Display rotated 180° toggle (which side faces the customer). */
+    val flipped: Boolean,
 )
 
 /** Public, non-sensitive subset for the customer-facing display (no PIN). */
@@ -39,9 +71,11 @@ data class DisplayConfigDTO(
     val logoUrl: String,
     /** Operating mode so the display can indicate simulation vs. live. */
     val mode: String,
+    /** Display rotated 180° toggle (customer-facing side). */
+    val flipped: Boolean,
 )
 
-/** Operating mode constants. Token blank -> simulation; token present -> Fio. */
+/** Operating mode constants. No tokens -> simulation; >=1 token -> Fio. */
 object Mode {
     const val SIMULATION = "simulace"
     const val FIO = "fio"
@@ -50,19 +84,27 @@ object Mode {
 object Config {
     private val HTTP = Regex("^https?://", RegexOption.IGNORE_CASE)
 
-    /** Validate and normalize a config update. Throws [ConfigError] on invalid input. */
+    /**
+     * Validate and normalize a config update. Throws [ConfigError] on invalid input.
+     * Note: the password is NO LONGER set here — it is managed only via the password
+     * endpoints. A pre-existing password is preserved by the caller (see AppServer).
+     */
     fun validate(
         name: String?,
         iban: String?,
-        token: String?,
+        tokens: List<String>?,
         licenseKey: String?,
         logoUrl: String?,
         pin: String?,
+        flipped: Boolean? = null,
     ): MerchantConfig {
         val n = name ?: throw ConfigError("název je povinný")
         val ibanRaw = iban ?: throw ConfigError("IBAN nebo číslo účtu je povinné")
-        // Token is now optional: blank token selects simulation mode.
-        val tok = (token ?: "").trim()
+        // Tokens are optional: an empty list selects simulation mode.
+        val toks = (tokens ?: emptyList())
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .take(MAX_TOKENS)
         // License is no longer required; keep the field (default "").
         val lic = (licenseKey ?: "").trim()
         val logo = (logoUrl ?: "").trim()
@@ -84,21 +126,26 @@ object Config {
         if (logo.isNotEmpty() && !HTTP.containsMatchIn(logo)) {
             throw ConfigError("logoUrl musí začínat http:// nebo https://")
         }
-        if (p.isNotEmpty() && p.length < 4) throw ConfigError("PIN musí mít alespoň 4 znaky")
+        if (p.isNotEmpty() && p.length < 4) throw ConfigError("heslo musí mít alespoň 4 znaky")
 
         return MerchantConfig(
             name = n.trim(),
             iban = normalizedIban,
-            token = tok,
+            tokens = toks,
             licenseKey = lic,
             logoUrl = logo,
             pin = p,
+            flipped = flipped ?: false,
+            legacyToken = null,
         )
     }
 
-    /** Operating mode: token blank -> simulation, token present -> Fio. */
+    /** Number of configured (normalized) tokens. */
+    fun tokenCount(c: MerchantConfig?): Int = c?.normalizedTokens()?.size ?: 0
+
+    /** Operating mode: no tokens -> simulation, >=1 token -> Fio. */
     fun modeOf(c: MerchantConfig?): String =
-        if (c?.token?.isNotBlank() == true) Mode.FIO else Mode.SIMULATION
+        if (tokenCount(c) > 0) Mode.FIO else Mode.SIMULATION
 
     /** Mask a secret so it never leaves the server in full. */
     fun maskToken(token: String): String {
@@ -109,7 +156,7 @@ object Config {
 
     /**
      * A config is "configured" when name and a valid account/IBAN are present.
-     * The token is NO LONGER required — a blank token simply selects simulation mode,
+     * Tokens are NOT required — an empty token list simply selects simulation mode,
      * which still lets the operator create payments.
      */
     fun isConfigured(c: MerchantConfig?): Boolean =
@@ -120,21 +167,30 @@ object Config {
 
     fun toDTO(c: MerchantConfig?): ConfigDTO {
         if (c == null) {
-            return ConfigDTO("", "", "", "", "", false, true, Mode.SIMULATION, false)
+            return ConfigDTO(
+                name = "", iban = "", tokensMasked = emptyList(), tokenCount = 0,
+                licenseKey = "", logoUrl = "", configured = false, licensed = true,
+                mode = Mode.SIMULATION, hasPin = false, passwordSet = false, flipped = false,
+            )
         }
+        val toks = c.normalizedTokens()
+        val pwSet = c.pin.isNotEmpty()
         return ConfigDTO(
             name = c.name,
             iban = c.iban,
-            tokenMasked = maskToken(c.token),
+            tokensMasked = toks.map { maskToken(it) },
+            tokenCount = toks.size,
             licenseKey = c.licenseKey,
             logoUrl = c.logoUrl,
             configured = isConfigured(c),
             licensed = true,
             mode = modeOf(c),
-            hasPin = c.pin.isNotEmpty(),
+            hasPin = pwSet,
+            passwordSet = pwSet,
+            flipped = c.flipped,
         )
     }
 
     fun toDisplayDTO(c: MerchantConfig?): DisplayConfigDTO =
-        DisplayConfigDTO(name = c?.name ?: "", logoUrl = c?.logoUrl ?: "", mode = modeOf(c))
+        DisplayConfigDTO(name = c?.name ?: "", logoUrl = c?.logoUrl ?: "", mode = modeOf(c), flipped = c?.flipped ?: false)
 }
