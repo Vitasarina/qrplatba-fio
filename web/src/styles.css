@@ -304,16 +304,17 @@ tbody tr:hover { background: var(--surface-2); }
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1.5rem;
-  /* 10% breathing room from the display edges (logo spans the middle 80%). */
-  width: 80%;
+  gap: 2vh;
+  width: 100%;
   will-change: transform;
   transition: transform 1.5s ease;
 }
 .display .screensaver-logo {
   display: block;
-  width: 100%;
-  max-height: 45vh;
+  margin: 0 auto;
+  width: auto;
+  max-width: 80%;
+  max-height: 30vh;
   object-fit: contain;
 }
 .display .screensaver-name {
@@ -322,11 +323,17 @@ tbody tr:hover { background: var(--surface-2); }
   color: #f8fafc;
   text-align: center;
 }
+/* "QR PLATBA" as large as possible — spans (nearly) the full screen width. */
 .display .screensaver-caption {
-  font-size: clamp(1.2rem, 4vw, 2.4rem);
-  font-weight: 600;
+  width: 100%;
+  font-size: 16vw;
+  line-height: 1;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: -0.03em;
+  white-space: nowrap;
   color: #93c5fd;
-  letter-spacing: 0.04em;
+  text-align: center;
 }
 
 /* Invisible hidden-admin trigger in the top-right corner of the display. */
@@ -554,3 +561,201 @@ tbody tr:hover { background: var(--surface-2); }
 }
 .numpad-key-enter:active:not(:disabled) { background: var(--primary-hover); }
 .numpad-key-enter:disabled { background: #1e3a8a; border-color: #1e3a8a; }
+
+/* ---------- Mode select (startup / switch) ---------- */
+.mode-select {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1.25rem;
+  background: var(--surface-2);
+}
+.mode-select-inner { width: 100%; max-width: 760px; text-align: center; }
+.mode-select-inner h1 { margin: 0 0 0.35rem; }
+.mode-select-inner .subtitle { color: var(--text-muted); margin: 0 0 1.75rem; }
+.mode-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+@media (max-width: 620px) { .mode-cards { grid-template-columns: 1fr; } }
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  text-align: center;
+  background: var(--surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.75rem 1.25rem;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.05s;
+  color: var(--text);
+  font: inherit;
+}
+.mode-card:hover:not(:disabled) { border-color: var(--primary); }
+.mode-card:active:not(:disabled) { transform: scale(0.99); }
+.mode-card:disabled { opacity: 0.6; cursor: not-allowed; }
+.mode-card.is-current { border-color: var(--primary); }
+.mode-card-icon { font-size: 2.6rem; line-height: 1; }
+.mode-card-title { font-size: 1.35rem; font-weight: 800; }
+.mode-card-desc { color: var(--text-muted); font-size: 0.95rem; }
+.mode-card-busy { color: var(--primary); font-weight: 600; font-size: 0.85rem; }
+
+/* ---------- Operating-mode switch (Settings) ---------- */
+.opmode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+@media (max-width: 560px) { .opmode-switch { grid-template-columns: 1fr; } }
+.opmode-option {
+  text-align: left;
+  background: var(--surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+}
+.opmode-option:hover:not(:disabled) { border-color: var(--primary); }
+.opmode-option.is-current { border-color: var(--primary); background: #eff6ff; }
+.opmode-option:disabled { opacity: 0.6; cursor: not-allowed; }
+.opmode-option-title { font-weight: 700; }
+.opmode-option-desc { color: var(--text-muted); font-size: 0.85rem; margin-top: 0.25rem; }
+.opmode-current-tag { color: var(--primary); font-weight: 600; }
+
+/* ---------- Paper-mode watch ---------- */
+.paper-page .watch-waiting,
+.paper-page .watch-result { text-align: center; padding: 2.25rem 1.5rem; }
+.paper-page .watch-waiting h1,
+.paper-page .watch-result h1 { margin: 1rem 0 0.5rem; }
+.watch-expected { font-size: 1.1rem; }
+.watch-countdown { margin-top: 0.75rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.watch-result .result-icon { font-size: 4.5rem; line-height: 1; }
+.watch-result .result-paid { color: var(--success); }
+.watch-result .result-fail { color: var(--danger); }
+.watch-result .kv { justify-content: center; max-width: 320px; margin: 1rem auto 0; }
+.watch-amount { font-size: 2.6rem; font-weight: 800; margin: 0.25rem 0; }
+.watch-ok { border-color: var(--success); }
+.watch-fail { border-color: var(--danger); }
+
+.spinner.lg {
+  width: 2.75rem;
+  height: 2.75rem;
+  border-width: 4px;
+  display: inline-block;
+}
+
+/* Paper mode on the phone kiosk: dark, scrollable (not the two-sided display). */
+.display-paper {
+  position: relative;
+  width: 100vw;
+  min-height: 100dvh;
+  height: auto;
+  overflow-y: auto;
+  background: var(--bg);
+  color: #f8fafc;
+  display: block;
+  padding: 0;
+  text-align: left;
+}
+
+/* ---------- Paper mode (dark) ---------- */
+.paper {
+  min-height: 100dvh;
+  background: var(--bg);
+  color: #f8fafc;
+  display: flex;
+  flex-direction: column;
+}
+.paper-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 1rem 0.5rem;
+  min-height: 3rem;
+}
+.paper-logo { max-height: 12vh; max-width: 70%; object-fit: contain; display: block; }
+.paper-title { font-size: 1.6rem; font-weight: 800; color: #f8fafc; }
+.paper-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 1.5rem;
+  max-width: 30rem;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+.paper-intro { color: #cbd5e1; margin: 0 0 1.5rem; }
+.paper-muted { color: #94a3b8; }
+.paper-cta { font-size: 1.35rem; padding: 1.25rem; }
+.paper .watch-waiting,
+.paper .watch-result { width: 100%; }
+.paper .watch-waiting h1,
+.paper .watch-result h1 { margin: 1rem 0 0.5rem; }
+.paper .watch-countdown { color: #94a3b8; font-variant-numeric: tabular-nums; }
+.paper .watch-amount { font-size: 3rem; font-weight: 800; margin: 0.25rem 0; color: #f8fafc; }
+.paper .result-icon { font-size: 5rem; line-height: 1; }
+.paper .result-paid { color: #4ade80; }
+.paper .result-fail { color: #f87171; }
+.paper-kv { justify-content: center; max-width: 320px; margin: 1rem auto 0; }
+.paper-kv dt { color: #94a3b8; }
+.paper-kv dd { color: #f8fafc; }
+
+/* Today overlay panel in dark paper mode. */
+.overlay-panel.paper-panel { background: #1e293b; color: #f8fafc; }
+.paper-panel h2 { color: #f8fafc; }
+.paper-table { color: #f8fafc; }
+.paper-table th { color: #94a3b8; border-bottom-color: #334155; }
+.paper-table td { border-bottom-color: #1f2b3d; }
+.paper-panel .empty { color: #94a3b8; }
+
+/* ---------- Overlay (today's payments in paper mode) ---------- */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 1.25rem;
+  z-index: 50;
+  overflow-y: auto;
+}
+.overlay-panel {
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.25rem;
+  width: 100%;
+  max-width: 560px;
+  margin-top: 3vh;
+}
+
+/* ---------- Service mode card (admin) ---------- */
+.service-card { border: 2px solid var(--border); }
+.service-card.service-on { border-color: var(--success); background: #f0fdf4; }
+.service-card select {
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+}
+
+/* "Dnešní platby" button on the kasa numpad (dark). */
+.numpad-today {
+  align-self: center;
+  margin-bottom: 0.25rem;
+  padding: 0.55rem 1.3rem;
+  background: #1e293b;
+  color: #cbd5e1;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.numpad-today:active { background: #334155; transform: scale(0.98); }

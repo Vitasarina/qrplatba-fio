@@ -181,4 +181,40 @@ class DomainTest {
         assertEquals("Shop", c.name)
         assertEquals(VALID_IBAN, c.iban)
     }
+
+    // ---- operating (workflow) mode ----
+    @Test fun opModeNormalizes() {
+        assertEquals("kasa", cz.qrplatba.domain.OpMode.normalize("kasa"))
+        assertEquals("paper", cz.qrplatba.domain.OpMode.normalize("PAPER"))
+        assertEquals("", cz.qrplatba.domain.OpMode.normalize("nonsense"))
+        assertEquals("", cz.qrplatba.domain.OpMode.normalize(null))
+    }
+
+    @Test fun validateCarriesOpMode() {
+        val c = Config.validate("Shop", VALID_IBAN, emptyList(), null, null, null, null, "paper")
+        assertEquals("paper", c.opMode)
+        assertEquals("paper", Config.toDTO(c).opMode)
+        assertEquals("paper", Config.toDisplayDTO(c).opMode)
+    }
+
+    @Test fun validateDefaultsOpModeToNone() {
+        val c = Config.validate("Shop", VALID_IBAN, emptyList(), null, null, null)
+        assertEquals("", c.opMode)
+    }
+
+    // ---- password hashing ----
+    @Test fun passwordHashRoundTrips() {
+        val stored = cz.qrplatba.domain.PasswordHash.hash("s3cret")
+        assertTrue(cz.qrplatba.domain.PasswordHash.isHashed(stored))
+        assertFalse("hash must not contain the plaintext", stored.contains("s3cret"))
+        assertTrue(cz.qrplatba.domain.PasswordHash.verify("s3cret", stored))
+        assertFalse(cz.qrplatba.domain.PasswordHash.verify("wrong", stored))
+    }
+
+    @Test fun passwordHashVerifiesLegacyPlaintext() {
+        // Old installs stored the password in plaintext; verify must still accept it.
+        assertTrue(cz.qrplatba.domain.PasswordHash.verify("1234", "1234"))
+        assertFalse(cz.qrplatba.domain.PasswordHash.verify("0000", "1234"))
+        assertFalse(cz.qrplatba.domain.PasswordHash.isHashed("1234"))
+    }
 }

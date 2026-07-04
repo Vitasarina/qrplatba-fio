@@ -10,6 +10,8 @@ data class BankTransaction(
     val currency: String,
     val vs: String?,
     val receivedAt: Long,
+    /** Counterparty (payer) name from the statement, if the bank provides one. */
+    val counterpartyName: String? = null,
 )
 
 /** Raised by a gateway when the bank cannot be reached (drives UNKNOWN handling). */

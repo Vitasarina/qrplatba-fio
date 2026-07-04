@@ -10,6 +10,7 @@ import cz.qrplatba.service.EventBus
 import cz.qrplatba.service.MatchingService
 import cz.qrplatba.service.SessionService
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -182,6 +183,83 @@ class MatchingTest {
         val s = h.sessions.createSession("0.30")
         h.gateway.enqueue(money("0.1").add(money("0.2")), s.vs)
         h.matching.forceCheck()
+        assertEquals(SessionStatus.PAID, h.sessions.getSession(s.id).status)
+    }
+
+    // ---- paper-mode watch sessions (match the next incoming payment) ----
+
+    @Test fun watchMatchesAnyIncomingPayment() {
+        val h = Harness(); h.configure()
+        val w = h.sessions.createWatchSession(null) // any amount
+        assertTrue(w.watch)
+        assertEquals(SessionStatus.PENDING, w.status)
+        h.gateway.enqueue(money("42.00"), vs = null, counterpartyName = "Jan Novák")
+        h.matching.forceCheck()
+        val after = h.sessions.getSession(w.id)
+        assertEquals(SessionStatus.PAID, after.status)
+        assertEquals("Jan Novák", after.payerName)
+        assertEquals(0, after.receivedAmount!!.compareTo(money("42.00")))
+    }
+
+    @Test fun watchWithExpectedAmountIgnoresWrongThenMatchesRight() {
+        val h = Harness(); h.configure()
+        val w = h.sessions.createWatchSession("100.00")
+        // Wrong amount: watch stays pending, tx recorded unmatched.
+        h.gateway.enqueue(money("50.00"), vs = null)
+        h.matching.forceCheck()
+        assertEquals(SessionStatus.PENDING, h.sessions.getSession(w.id).status)
+        // Right amount: watch resolves.
+        h.gateway.enqueue(money("100.00"), vs = null, counterpartyName = "Petr")
+        h.matching.forceCheck()
+        val after = h.sessions.getSession(w.id)
+        assertEquals(SessionStatus.PAID, after.status)
+        assertEquals("Petr", after.payerName)
+    }
+
+    @Test fun watchTimesOutToExpired() {
+        val h = Harness(); h.configure()
+        val w = h.sessions.createWatchSession(null, ttlMs = 1L)
+        // No payment arrives; a tick past expiry expires the watch (→ negative result/sound).
+        h.matching.expireStale(w.createdAt + 10)
+        assertEquals(SessionStatus.EXPIRED, h.sessions.getSession(w.id).status)
+    }
+
+    @Test fun watchIgnoresVsAndBindsPaymentWithoutVs() {
+        val h = Harness(); h.configure()
+        val w = h.sessions.createWatchSession(null)
+        // Paper payments typically carry NO variable symbol; the watch must still bind.
+        h.gateway.enqueue(money("15.00"), vs = null)
+        h.matching.forceCheck()
+        assertEquals(SessionStatus.PAID, h.sessions.getSession(w.id).status)
+    }
+
+    // ---- bank connectivity precheck (real token query) ----
+
+    @Test fun probeBankReachableWhenGatewayResponds() {
+        val h = Harness(); h.configure() // 1 token -> Fio path, gateway available
+        assertTrue(h.matching.probeBank())
+    }
+
+    @Test fun probeBankUnreachableWhenGatewayThrows() {
+        val h = Harness(); h.configure()
+        h.gateway.setAvailable(false) // simulate bank unreachable
+        assertFalse(h.matching.probeBank())
+    }
+
+    @Test fun probeBankTrueInSimulationWithoutQuery() {
+        val h = Harness()
+        // No tokens -> simulation; probe reports reachable without touching the gateway.
+        h.sessions.setConfig("Shop", VALID_IBAN, emptyList(), "", null)
+        h.gateway.setAvailable(false) // even if the gateway would fail, sim is "reachable"
+        assertTrue(h.matching.probeBank())
+    }
+
+    @Test fun probeBankReconcilesReturnedTransactions() {
+        val h = Harness(); h.configure()
+        val s = h.sessions.createSession("77.00")
+        // A payment already sits at the bank when the precheck runs: the probe must not lose it.
+        h.gateway.enqueue(s.amount, s.vs)
+        assertTrue(h.matching.probeBank())
         assertEquals(SessionStatus.PAID, h.sessions.getSession(s.id).status)
     }
 

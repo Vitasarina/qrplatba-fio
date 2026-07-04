@@ -41,6 +41,7 @@ class SimulatorGateway : BankGateway {
         currency: String = "CZK",
         externalId: String? = null,
         receivedAt: Long = System.currentTimeMillis(),
+        counterpartyName: String? = null,
     ): BankTransaction {
         val t = BankTransaction(
             externalId = externalId ?: nextExternalId(),
@@ -48,6 +49,7 @@ class SimulatorGateway : BankGateway {
             currency = currency,
             vs = vs,
             receivedAt = receivedAt,
+            counterpartyName = counterpartyName,
         )
         queue.addLast(t)
         return t

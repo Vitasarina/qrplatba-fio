@@ -42,11 +42,24 @@ class SessionService(
         licenseKey: String?,
         logoUrl: String?,
         flipped: Boolean? = null,
+        opMode: String? = null,
     ): ConfigDTO {
-        val existingPin = repo.getConfig()?.pin ?: ""
-        val cfg = Config.validate(name, iban, tokens, licenseKey, logoUrl, existingPin, flipped)
+        val existing = repo.getConfig()
+        val existingPin = existing?.pin ?: ""
+        // Preserve the chosen operating mode when the caller doesn't send one.
+        val effectiveOpMode = opMode ?: existing?.opMode
+        val cfg = Config.validate(name, iban, tokens, licenseKey, logoUrl, existingPin, flipped, effectiveOpMode)
         repo.setConfig(cfg)
         return Config.toDTO(cfg)
+    }
+
+    /** Set only the operating (workflow) mode, preserving everything else in the config. */
+    fun setOpMode(mode: String?): ConfigDTO {
+        val existing = repo.getConfig()
+            ?: throw NotConfiguredError("Obchodník není nakonfigurován.")
+        val updated = existing.copy(opMode = cz.qrplatba.domain.OpMode.normalize(mode), legacyToken = null)
+        repo.setConfig(updated)
+        return Config.toDTO(updated)
     }
 
     /** Factory reset: clear config, sessions and transactions (back to first run). */
@@ -91,6 +104,64 @@ class SessionService(
             note = parsedNote,
             overpaid = false,
             receivedAmount = null,
+        )
+
+        repo.createSession(session)
+        events.publishSessionChange(session)
+        return session
+    }
+
+    /**
+     * Create a paper-mode "watch" session: the operator has a printed paper QR and just
+     * started waiting for the next incoming payment. No on-screen QR is needed. An optional
+     * [expectedAmount] narrows matching to that exact amount (safer with concurrent payers);
+     * when blank/null, any incoming payment matches. Times out after [ttlMs] (default 2 min).
+     */
+    fun createWatchSession(
+        expectedAmount: String? = null,
+        note: String? = null,
+        ttlMs: Long = 120_000L,
+    ): PaymentSession {
+        val config = repo.getConfig()
+        if (!Config.isConfigured(config)) {
+            throw NotConfiguredError("Obchodník není nakonfigurován (vyžadován název a IBAN/číslo účtu).")
+        }
+        config!!
+
+        val expected: Money =
+            if (expectedAmount.isNullOrBlank()) java.math.BigDecimal.ZERO else parseAmount(expectedAmount)
+        val parsedNote = parseNote(note)
+
+        val taken = repo.openVsSet()
+        val vs = Vs.generate(taken)
+
+        val now = System.currentTimeMillis()
+        // A SPAYD is still produced (paper QR is external, but /api/qr stays valid for
+        // display fallbacks). VS is intentionally empty — paper payments rarely carry one.
+        val spayd = Spayd.build(
+            iban = config.iban,
+            amount = expected,
+            vs = "",
+            message = buildSpaydMessage(config.name, parsedNote),
+            currency = "CZK",
+        )
+
+        val session = PaymentSession(
+            id = UUID.randomUUID().toString(),
+            amount = expected,
+            currency = "CZK",
+            vs = vs,
+            spayd = spayd,
+            status = SessionStatus.PENDING,
+            createdAt = now,
+            expiresAt = now + ttlMs,
+            paidAt = null,
+            matchedTxId = null,
+            note = parsedNote,
+            overpaid = false,
+            receivedAmount = null,
+            watch = true,
+            payerName = null,
         )
 
         repo.createSession(session)

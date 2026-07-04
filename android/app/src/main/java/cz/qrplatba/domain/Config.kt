@@ -28,6 +28,13 @@ data class MerchantConfig(
     val pin: String = "",
     /** Display rotated 180° toggle: which side the customer-facing screens face. */
     val flipped: Boolean = false,
+    /**
+     * Operating (workflow) mode chosen at startup: "" = not chosen yet, "kasa" = at the
+     * register (operator types amount → on-screen QR → auto-check), "paper" = printed
+     * paper QR (operator waits for the next incoming payment, manual verification).
+     * NOTE: distinct from [ConfigDTO.mode] ("simulace"/"fio"), which is derived from tokens.
+     */
+    val opMode: String = "",
     /** Legacy single-token field from old persisted configs; migrated into [tokens]. */
     @SerialName("token") val legacyToken: String? = null,
 ) {
@@ -62,6 +69,8 @@ data class ConfigDTO(
     val passwordSet: Boolean,
     /** Display rotated 180° toggle (which side faces the customer). */
     val flipped: Boolean,
+    /** Operating (workflow) mode: "" (not chosen), "kasa", or "paper". */
+    val opMode: String,
 )
 
 /** Public, non-sensitive subset for the customer-facing display (no PIN). */
@@ -73,12 +82,28 @@ data class DisplayConfigDTO(
     val mode: String,
     /** Display rotated 180° toggle (customer-facing side). */
     val flipped: Boolean,
+    /** Operating (workflow) mode: "" (not chosen), "kasa", or "paper". */
+    val opMode: String,
 )
 
 /** Operating mode constants. No tokens -> simulation; >=1 token -> Fio. */
 object Mode {
     const val SIMULATION = "simulace"
     const val FIO = "fio"
+}
+
+/** Operating (workflow) mode constants, chosen by the operator at startup. */
+object OpMode {
+    const val NONE = ""
+    const val KASA = "kasa"
+    const val PAPER = "paper"
+
+    /** Normalize arbitrary input to a known mode; unknown/blank -> "" (not chosen). */
+    fun normalize(value: String?): String = when (value?.trim()?.lowercase()) {
+        KASA -> KASA
+        PAPER -> PAPER
+        else -> NONE
+    }
 }
 
 object Config {
@@ -97,6 +122,7 @@ object Config {
         logoUrl: String?,
         pin: String?,
         flipped: Boolean? = null,
+        opMode: String? = null,
     ): MerchantConfig {
         val n = name ?: throw ConfigError("název je povinný")
         val ibanRaw = iban ?: throw ConfigError("IBAN nebo číslo účtu je povinné")
@@ -136,6 +162,7 @@ object Config {
             logoUrl = logo,
             pin = p,
             flipped = flipped ?: false,
+            opMode = OpMode.normalize(opMode),
             legacyToken = null,
         )
     }
@@ -171,6 +198,7 @@ object Config {
                 name = "", iban = "", tokensMasked = emptyList(), tokenCount = 0,
                 licenseKey = "", logoUrl = "", configured = false, licensed = true,
                 mode = Mode.SIMULATION, hasPin = false, passwordSet = false, flipped = false,
+                opMode = OpMode.NONE,
             )
         }
         val toks = c.normalizedTokens()
@@ -188,9 +216,16 @@ object Config {
             hasPin = pwSet,
             passwordSet = pwSet,
             flipped = c.flipped,
+            opMode = OpMode.normalize(c.opMode),
         )
     }
 
     fun toDisplayDTO(c: MerchantConfig?): DisplayConfigDTO =
-        DisplayConfigDTO(name = c?.name ?: "", logoUrl = c?.logoUrl ?: "", mode = modeOf(c), flipped = c?.flipped ?: false)
+        DisplayConfigDTO(
+            name = c?.name ?: "",
+            logoUrl = c?.logoUrl ?: "",
+            mode = modeOf(c),
+            flipped = c?.flipped ?: false,
+            opMode = OpMode.normalize(c?.opMode),
+        )
 }

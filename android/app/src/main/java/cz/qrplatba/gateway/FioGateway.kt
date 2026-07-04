@@ -33,6 +33,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *   column0  = date (datum)            -> receivedAt
  *   column1  = amount (objem)          -> amount  (keep only incoming, amount > 0)
  *   column5  = variabilní symbol (VS)  -> vs
+ *   column10 = název protiúčtu (plátce)-> counterpartyName (fallback: column7, column2)
  *   column14 = currency (měna)         -> currency
  *   column22 = ID pohybu               -> externalId (idempotence key)
  *
@@ -126,6 +127,11 @@ class FioGateway(
                 val currency = colString(tx, "column14") ?: "CZK"
                 val receivedAt = colString(tx, "column0")?.let { parseFioDate(it) }
                     ?: System.currentTimeMillis()
+                // Payer name: prefer the counterparty account name (column10); fall back to
+                // the user identification (column7) or the raw counterparty account (column2).
+                val counterpartyName = (colString(tx, "column10")
+                    ?: colString(tx, "column7")
+                    ?: colString(tx, "column2"))?.trim()?.ifBlank { null }
 
                 out.add(
                     BankTransaction(
@@ -134,6 +140,7 @@ class FioGateway(
                         currency = currency,
                         vs = vs?.ifBlank { null },
                         receivedAt = receivedAt,
+                        counterpartyName = counterpartyName,
                     )
                 )
             }

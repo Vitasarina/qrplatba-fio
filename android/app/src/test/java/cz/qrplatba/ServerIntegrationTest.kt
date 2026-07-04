@@ -5,6 +5,7 @@ import cz.qrplatba.persistence.JsonSessionRepository
 import cz.qrplatba.server.AppConfig
 import cz.qrplatba.server.AppServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.BufferedReader
@@ -470,6 +471,141 @@ class ServerIntegrationTest {
         } finally {
             server.stop()
         }
+    }
+
+    @Test
+    fun opmode_set_and_reflected_in_config() {
+        val (server, base, _) = bootServer()
+        try {
+            configure(base)
+            // Default: no operating mode chosen.
+            val cfg0 = req(base, "GET", "/api/config", pin = true)
+            assertTrue("default opMode empty: ${cfg0.body}", cfg0.body.contains("\"opMode\":\"\""))
+
+            // Setting the mode is PIN-protected.
+            assertEquals(401, req(base, "POST", "/api/opmode", "{\"mode\":\"paper\"}").code)
+
+            // Set to paper; config + display-config both reflect it.
+            val set = req(base, "POST", "/api/opmode", "{\"mode\":\"paper\"}", pin = true)
+            assertEquals(200, set.code)
+            assertTrue("opMode paper: ${set.body}", set.body.contains("\"opMode\":\"paper\""))
+            assertTrue(req(base, "GET", "/api/config", pin = true).body.contains("\"opMode\":\"paper\""))
+            assertTrue(req(base, "GET", "/api/display-config").body.contains("\"opMode\":\"paper\""))
+
+            // Unknown mode normalizes back to none.
+            val bogus = req(base, "POST", "/api/opmode", "{\"mode\":\"bogus\"}", pin = true)
+            assertTrue("bogus -> empty: ${bogus.body}", bogus.body.contains("\"opMode\":\"\""))
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun watch_session_created_and_bound_in_sim() {
+        val (server, base, _) = bootServer()
+        try {
+            configure(base) // simulation (no tokens)
+
+            // Watch session creation is PIN-protected and marks the session as a watch.
+            assertEquals(401, req(base, "POST", "/api/sessions/watch", "{}").code)
+            val w = req(base, "POST", "/api/sessions/watch", "{}", pin = true)
+            assertEquals(201, w.code)
+            assertTrue("watch flag set: ${w.body}", w.body.contains("\"watch\":true"))
+            assertTrue(w.body.contains("\"status\":\"PENDING\""))
+
+            // Simulation emits an incoming payment that the watch binds -> PAID.
+            server.matching.forceCheck()
+            val id = field(w.body, "id") ?: error("no id in ${w.body}")
+            val after = req(base, "GET", "/api/sessions/$id")
+            assertTrue("watch paid: ${after.body}", after.body.contains("\"status\":\"PAID\""))
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun lan_gate_decision_is_pure() {
+        // Loopback / on-device is always allowed; LAN is blocked unless service mode is active.
+        assertFalse(AppServer.lanBlocked(loopback = true, serviceActive = false))
+        assertFalse(AppServer.lanBlocked(loopback = true, serviceActive = true))
+        assertTrue(AppServer.lanBlocked(loopback = false, serviceActive = false))
+        assertFalse(AppServer.lanBlocked(loopback = false, serviceActive = true))
+    }
+
+    @Test
+    fun service_mode_toggles_and_reports_state() {
+        val (server, base, _) = bootServer()
+        try {
+            // Default: off (fresh process).
+            val s0 = req(base, "GET", "/api/service-mode")
+            assertEquals(200, s0.code)
+            assertTrue("default off: ${s0.body}", s0.body.contains("\"on\":false"))
+            assertFalse(server.serviceModeActive())
+
+            // Enable from loopback (the test client is 127.0.0.1) for 5 minutes.
+            val on = req(base, "POST", "/api/service-mode", "{\"on\":true,\"minutes\":5}")
+            assertEquals(200, on.code)
+            assertTrue("now on: ${on.body}", on.body.contains("\"on\":true"))
+            assertTrue(server.serviceModeActive())
+            assertTrue("state reflects on", req(base, "GET", "/api/service-mode").body.contains("\"on\":true"))
+
+            // Disable again.
+            val off = req(base, "POST", "/api/service-mode", "{\"on\":false}")
+            assertEquals(200, off.code)
+            assertTrue("now off: ${off.body}", off.body.contains("\"on\":false"))
+            assertFalse(server.serviceModeActive())
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun brute_force_lockout_after_repeated_failures() {
+        val (server, base, _) = bootServer()
+        try {
+            setupPassword(base) // password = 1234
+            // Five consecutive wrong guesses.
+            for (i in 0 until 5) {
+                assertEquals(401, req(base, "GET", "/api/auth", pinValue = "0000").code)
+            }
+            // Now locked out: even the CORRECT password is rejected with 429 for a cooldown.
+            assertEquals(429, req(base, "GET", "/api/auth", pinValue = "1234").code)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun public_session_endpoints_hide_iban_and_reference() {
+        val (server, base, _) = bootServer()
+        try {
+            configure(base) // simulation
+            val created = req(base, "POST", "/api/sessions", "{\"amount\":\"88.00\"}", pin = true)
+            assertEquals(201, created.code)
+            val id = field(created.body, "id") ?: error("no id in ${created.body}")
+
+            // Public "active" must NOT leak the SPAYD (IBAN), VS or note.
+            val active = req(base, "GET", "/api/sessions/active")
+            assertEquals(200, active.code)
+            assertFalseContains(active.body, "spayd")
+            assertFalseContains(active.body, "CZ6508000000192000145399")
+            assertFalseContains(active.body, "\"vs\"")
+            // ...but still carries what the display needs.
+            assertTrue("public active keeps amount: ${active.body}", active.body.contains("\"amount\":\"88.00\""))
+
+            // Public GET /{id} (no pin) is minimal; authenticated GET /{id} is full.
+            val pub = req(base, "GET", "/api/sessions/$id")
+            assertFalseContains(pub.body, "spayd")
+            val full = req(base, "GET", "/api/sessions/$id", pin = true)
+            assertTrue("authenticated {id} exposes spayd: ${full.body}", full.body.contains("\"spayd\""))
+            assertTrue("authenticated {id} exposes vs: ${full.body}", full.body.contains("\"vs\""))
+        } finally {
+            server.stop()
+        }
+    }
+
+    private fun assertFalseContains(body: String, needle: String) {
+        assertTrue("public body must NOT contain '$needle': $body", !body.contains(needle))
     }
 
     @Test

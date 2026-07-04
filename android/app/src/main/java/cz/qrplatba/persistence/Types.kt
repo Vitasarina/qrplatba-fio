@@ -15,6 +15,8 @@ data class StoredTransaction(
     val matchedSessionId: String? = null,
     /** Why it was not matched, if unmatched: "no-session" | "duplicate" | "currency". */
     val unmatchedReason: String? = null,
+    /** Counterparty (payer) name from the bank statement, if the bank provides one. */
+    val counterpartyName: String? = null,
 )
 
 /** Public DTO for an incoming bank transaction (operator "today's payments" view). */
@@ -28,6 +30,8 @@ data class TransactionDTO(
     val matchedSessionId: String? = null,
     /** Unmatched reason ("no-session" | "duplicate" | "currency"), or null when matched. */
     val reason: String? = null,
+    /** Counterparty (payer) name from the bank statement, or null when unknown. */
+    val counterpartyName: String? = null,
 )
 
 fun StoredTransaction.toDTO(): TransactionDTO = TransactionDTO(
@@ -38,6 +42,7 @@ fun StoredTransaction.toDTO(): TransactionDTO = TransactionDTO(
     matched = matchedSessionId != null,
     matchedSessionId = matchedSessionId,
     reason = unmatchedReason,
+    counterpartyName = counterpartyName,
 )
 
 data class SessionFilter(

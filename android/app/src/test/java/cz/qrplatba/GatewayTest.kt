@@ -67,6 +67,25 @@ class GatewayTest {
         FioGateway.parseFioTransactions("not json")
     }
 
+    @Test fun fioParsesCounterpartyName() {
+        val body = """
+            {"accountStatement":{"transactionList":{"transaction":[
+              {
+                "column0": { "value": "2026-07-04+0200", "name": "Datum", "id": 0 },
+                "column1": { "value": 250.00, "name": "Objem", "id": 1 },
+                "column5": { "value": "555", "name": "VS", "id": 5 },
+                "column10": { "value": "Jan Novák", "name": "Název protiúčtu", "id": 10 },
+                "column14": { "value": "CZK", "name": "Měna", "id": 14 },
+                "column22": { "value": 26000000009, "name": "ID pohybu", "id": 22 }
+              }
+            ]}}}
+        """.trimIndent()
+        val txs = FioGateway.parseFioTransactions(body)
+        assertEquals(1, txs.size)
+        assertEquals("Jan Novák", txs[0].counterpartyName)
+    }
+
+
     // ---- FioGateway round-robin token rotation (no network) ----
 
     @Test fun fioRotatesTokensRoundRobin() {

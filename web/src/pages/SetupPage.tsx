@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '../lib/api'
 import { setPin } from '../lib/pin'
-import type { AppMode } from '../types'
+import { useAppContext } from '../components/AppLayout'
+import type { AppMode, OpMode } from '../types'
 
 // Shop identity fields. Tokens are managed as a separate dynamic list (below).
 type Form = {
@@ -295,6 +296,8 @@ export function SetupPage() {
         </form>
       )}
 
+      {!loading && <OpModeCard onDone={(t) => setBanner({ kind: 'success', text: t })} />}
+
       {!loading && <ChangePasswordCard onDone={(t) => setBanner({ kind: 'success', text: t })} />}
 
       {!loading && (
@@ -326,6 +329,62 @@ export function SetupPage() {
         </div>
       )}
     </main>
+  )
+}
+
+// Switch the operating (workflow) mode: "kasa" (register, on-screen QR) vs
+// "paper" (printed QR, wait for the incoming payment). Persists via the backend.
+const OP_MODES: { key: OpMode; title: string; desc: string }[] = [
+  { key: 'kasa', title: 'Kasa', desc: 'Obsluha zadá částku → QR na displeji → automatické ověření.' },
+  { key: 'paper', title: 'Papírové QR', desc: 'Vytištěné QR → čekání na příchozí platbu a ruční ověření.' },
+]
+
+function OpModeCard({ onDone }: { onDone: (text: string) => void }) {
+  const { opMode, setOpMode } = useAppContext()
+  const [busy, setBusy] = useState<OpMode | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  async function choose(mode: OpMode) {
+    if (mode === opMode) return
+    setBusy(mode)
+    setError(null)
+    try {
+      await api.setOpMode(mode)
+      setOpMode(mode)
+      onDone('Provozní režim změněn.')
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Změna režimu selhala.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="card">
+      <h2 style={{ margin: '0 0 0.25rem' }}>Provozní režim</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Jak přijímáte platby. Změna se projeví na všech zařízeních.
+      </p>
+      {error && <div className="banner error">{error}</div>}
+      <div className="opmode-switch">
+        {OP_MODES.map((m) => (
+          <button
+            key={m.key}
+            type="button"
+            className={`opmode-option ${opMode === m.key ? 'is-current' : ''}`}
+            onClick={() => choose(m.key)}
+            disabled={busy != null}
+          >
+            <div className="opmode-option-title">
+              {m.title}
+              {opMode === m.key && <span className="opmode-current-tag"> — aktivní</span>}
+            </div>
+            <div className="opmode-option-desc">{m.desc}</div>
+            {busy === m.key && <div className="mode-card-busy">Ukládám…</div>}
+          </button>
+        ))}
+      </div>
+    </div>
   )
 }
 

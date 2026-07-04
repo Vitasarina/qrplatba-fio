@@ -1,13 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, urls } from '../lib/api'
 import { getPin } from '../lib/pin'
 import { useSession } from '../lib/useSession'
 import { formatCzk, formatTime, isTerminal, STATUS_META } from '../lib/format'
+import { playFail, playSuccess, unlockSound } from '../lib/sound'
 import type { AppMode, Session } from '../types'
 import { StatusBadge } from '../components/StatusBadge'
 import { SseIndicator } from '../components/SseIndicator'
+import { PaperWatch } from '../components/PaperWatch'
+import { useAppContext } from '../components/AppLayout'
 
 export function OperatorPage() {
+  const { opMode } = useAppContext()
+  // Paper mode has an entirely different flow (wait for the next incoming payment).
+  if (opMode === 'paper') return <PaperWatch />
+  return <KasaOperator />
+}
+
+function KasaOperator() {
   const [amountStr, setAmountStr] = useState('')
   const [note, setNote] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -63,10 +73,13 @@ export function OperatorPage() {
     }
 
     setSubmitting(true)
+    unlockSound() // enable result sounds on this user gesture
     try {
       const created = await api.createSession(amount, note)
       setActiveId(created.id)
     } catch (err) {
+      // A 503 here means the bank connectivity precheck failed — the QR was
+      // deliberately NOT issued because the payment couldn't be verified later.
       setError(err instanceof ApiError ? err.message : 'Nepodařilo se vystavit platbu.')
     } finally {
       setSubmitting(false)
@@ -190,6 +203,20 @@ function ActiveSession({
     checked && checked.id === liveSession.id && checked.status !== liveSession.status
       ? checked
       : liveSession
+
+  // Play the result sound once when the payment reaches a success/failure state.
+  const sounded = useRef<string | null>(null)
+  useEffect(() => {
+    const key = `${session.id}:${session.status}`
+    if (sounded.current === key) return
+    if (session.status === 'PAID' || session.status === 'OVERPAID') {
+      sounded.current = key
+      playSuccess()
+    } else if (session.status === 'EXPIRED') {
+      sounded.current = key
+      playFail()
+    }
+  }, [session.id, session.status])
 
   async function handleCheck() {
     setChecking(true)

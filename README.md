@@ -7,8 +7,9 @@ vidět, že platba dorazila — náhrada platebního terminálu kvůli vysokým 
 
 ## Jak se to ovládá
 
-Server (backend + web) běží buď **v telefonu** (Android appka) nebo **na PC** (`.exe`). Obsluhovat
-se dá **dvěma způsoby** — přímo na telefonu, nebo z jiného zařízení přes webovou stránku.
+Server (backend + web) běží **v telefonu/tabletu** (Android appka). Obsluhovat se dá **dvěma
+způsoby** — přímo na zařízení, nebo (jen během servisního režimu) z jiného zařízení přes webovou
+stránku.
 
 ### A) Obsluha přímo na telefonu (Android, dvoustranný režim)
 
@@ -28,20 +29,34 @@ k **zákazníkovi** naproti (180°). Telefonem se fyzicky neotáčí. Směr lze 
 **Skryté ovládání:** **5× rychle ťuknout do pravého horního rohu** displeje → **Správa** (admin):
 odkazy na nastavení/obsluhu a **obnova zapomenutého hesla** (jen přímo na zařízení).
 
-### B) Obsluha přes webovou stránku (jiné zařízení na stejné Wi-Fi)
+### B) Obsluha přes webovou stránku (jiné zařízení na stejné Wi-Fi) — jen v servisním režimu
 
-Server poslouchá na `0.0.0.0:8080`, takže z PC nebo jiného mobilu na stejné síti otevřeš:
+Z bezpečnostních důvodů server **nikoho na LAN neobsluhuje**, dokud se přímo na displeji nezapne
+**servisní režim** (5× ťuknout do pravého horního rohu → **Správa** → *Servisní režim → Zapnout*,
+na omezenou dobu; sám se zavře). Mimo něj běží obsluha jen přímo na zařízení (loopback), takže po
+síti žádná citlivá data (heslo, tokeny, platby) netečou. Když je servisní režim zapnutý, ukáže
+Správa adresu a QR na tyto stránky:
 
 | Stránka | URL | K čemu |
 |---|---|---|
 | **Obsluha** | `http://<IP>:8080/operator` | Zadávání částky (chráněno heslem) |
-| **Nastavení** | `http://<IP>:8080/setup` | Účet/IBAN, tokeny, heslo, logo, otočení, reset |
+| **Nastavení** | `http://<IP>:8080/setup` | Účet/IBAN, tokeny, heslo, logo, režim, reset |
 | **Dnešní platby** | `http://<IP>:8080/today` | Příchozí platby za dnešek (ověření bez banky) |
-| **Displej** | `http://<IP>:8080/display` | Obrazovka pro zákazníka (např. mobil u PC verze) |
-| **Správa** | `http://<IP>:8080/admin` | Odkazy + obnova hesla |
+| **Správa** | `http://<IP>:8080/admin` | Servisní režim + odkazy + obnova hesla |
 
-`<IP>` = adresa zařízení se serverem (Android: ukáže ji **Správa**; PC: `ipconfig` → Wi-Fi IPv4).
-Všechny stránky kromě **displeje** jsou chráněné **heslem**.
+`<IP>` = adresa zařízení se serverem (ukáže ji **Správa**). Všechny stránky kromě **displeje**
+jsou chráněné **heslem**.
+
+### Provozní režim (Kasa / Papírové QR)
+
+Při prvním spuštění (a kdykoli v Nastavení) se volí **provozní režim**:
+
+- **Kasa** — obsluha zadá částku, na displeji se zobrazí QR, platba se ověří automaticky. Před
+  zobrazením QR appka ověří spojení s bankou reálným dotazem tokenem; když banka není dostupná,
+  QR nevystaví.
+- **Papírové QR** — QR je vytištěné na papíře. Obsluha klikne „Čekat na platbu" a appka hlídá
+  následující příchozí platbu (volitelně přesně na zadanou částku) do ~2 min, s tlačítkem
+  „Dnešní platby" (jméno plátce, částka, čas). Výsledek doprovází zvuk (pozitivní/negativní).
 
 ### Heslo
 
@@ -76,31 +91,23 @@ Příchozí platby se čtou přes **Fio API tokeny** (read-only). Počet tokenů
 - `ACCEPTANCE.md` — akceptační kritéria
 - `IMPLEMENTATION-PLAN.md` — implementační plán (rozhraní, API, obrazovky, milníky)
 
-## Stack — poznámka k běhu
+## Stack
 
-Produkční cíl je **on-premise Android aplikace** (Kotlin + vestavěný Ktor server) běžící na tabletu v prodejně.
+Produktem je **on-premise Android aplikace** (Kotlin + vestavěný Ktor server, foreground service,
+WebView) běžící na tabletu/telefonu v prodejně. React UI (`web/`) je zabalené do APK a servírované
+Ktorem.
 
-Tato runnable verze ve fázi **simulace banky** je postavena v **Node.js + TypeScript** (server) a **React** (UI),
-protože je plně spustitelná a testovatelná bez Android zařízení. React UI se přenáší 1:1 do finální verze;
-serverová logika je zároveň spustitelnou specifikací pro pozdější port do Ktoru.
+> **Poznámka k PC/Node verzi:** dřívější desktopová `.exe` varianta (Node/TypeScript backend v
+> `server/`) je **zrušená a nedistribuuje se**. Její backend zaostal za sdíleným frontendem (chybí
+> mu heslo, provozní režimy, servisní režim atd.) a byl by nefunkční i nebezpečný. `server/`
+> zůstává v repu jen jako historická referenční implementace doménové logiky — **nestaví se ani
+> nenasazuje**.
 
 ## Struktura
 
-- `server/` — Node/TypeScript: Fastify API + SSE, `BankGateway` (Simulátor + stub Fio), párování plateb (referenční implementace)
-- `web/` — React/Vite: obrazovky nastavení, zadání obsluhy, displej, historie + ovládací panel simulátoru
-- `android/` — **produkční nativní aplikace** (Kotlin + vestavěný Ktor server, foreground service, WebView). Doménová logika portována ze `server/`, React build ze `web/` zabalen v assets.
-
-## PC varianta (.exe)
-
-`server/` zároveň slouží jako **desktopová verze**: jeden spustitelný soubor, který na PC běží jako backend a servíruje web (operátor/nastavení lokálně, displej z mobilu přes LAN). Build:
-
-```bash
-cd server
-npm install
-npm run build:exe   # vytvoří dist-pc/qr-payments-win.exe (+ linux)
-```
-
-Po spuštění `.exe` vypíše URL: operátor na `http://localhost:8080`, displej pro mobil na `http://<IP-PC>:8080/display`. Data se ukládají vedle .exe (`qr-data/`). Režim určuje token Fio (prázdný = simulace).
+- `android/` — **produkční nativní aplikace** (Kotlin + vestavěný Ktor server, foreground service, WebView). React build ze `web/` zabalen v assets.
+- `web/` — React/Vite: obrazovky nastavení, zadání obsluhy, displej, papírový režim, dnešní platby, správa.
+- `server/` — Node/TypeScript referenční implementace doménové logiky (**zrušená PC verze**, nestaví se).
 
 ## Build Android APK
 
@@ -119,12 +126,12 @@ JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 ANDROID_HOME=/home/agent/android-sd
 Po změně web UI ve `web/` je potřeba znovu zkopírovat build do `android/app/src/main/assets/web/`
 (`npm run build` v `web/` → kopie `dist/*`).
 
-## Spuštění (dev)
+## Vývoj web UI
+
+Web UI se vyvíjí ve `web/` a nasazuje do Android appky přes build + kopii do assets:
 
 ```bash
-# 1) backend
-cd server && npm install && npm run dev      # http://localhost:8080
-
-# 2) frontend
-cd web && npm install && npm run dev          # http://localhost:5173 (proxy na :8080)
+cd web && npm install && npm run build
+cp -r dist/* ../android/app/src/main/assets/web/
+# pak přestavět APK (viz výše)
 ```

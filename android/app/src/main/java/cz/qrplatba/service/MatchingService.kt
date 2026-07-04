@@ -44,6 +44,9 @@ class MatchingService(
     private val singleTokenDelayMs = 30_000L
     /** N > 1: first query delay (faster initial catch). */
     private val multiTokenFirstDelayMs = 10_000L
+    /** Paper-mode watch: query soon after the operator starts waiting (a payment may
+     *  already have arrived), then follow the steady per-token cadence. */
+    private val watchFirstDelayMs = 4_000L
 
     private fun tokenCount(): Int = repo.getConfig()?.normalizedTokens()?.size ?: 0
 
@@ -65,8 +68,13 @@ class MatchingService(
      */
     private fun isQueryDue(now: Long, session: cz.qrplatba.domain.PaymentSession, n: Int): Boolean {
         val firstForSession = lastQueryAt < session.createdAt
+        val firstDelay = when {
+            session.watch -> watchFirstDelayMs
+            n > 1 -> multiTokenFirstDelayMs
+            else -> singleTokenDelayMs
+        }
         val dueAt = if (firstForSession) {
-            session.createdAt + if (n > 1) multiTokenFirstDelayMs else singleTokenDelayMs
+            session.createdAt + firstDelay
         } else {
             lastQueryAt + pollIntervalMs(n)
         }
@@ -130,15 +138,18 @@ class MatchingService(
         }
     }
 
-    /** Fetch a batch and reconcile. Gateway failures set UNKNOWN on open sessions. */
-    fun poll(now: Long = System.currentTimeMillis()) {
+    /**
+     * Fetch a batch and reconcile. Gateway failures set UNKNOWN on open sessions.
+     * Returns true when the bank was reachable (fetch succeeded), false otherwise.
+     */
+    fun poll(now: Long = System.currentTimeMillis()): Boolean {
         val batch: List<BankTransaction> = try {
             gateway.fetchNewTransactions()
         } catch (e: Exception) {
             // Bank unreachable: mark open PENDING sessions UNKNOWN ("cannot verify").
             lastPollOk = false
             markOpenUnknown()
-            return
+            return false
         }
 
         // Recovered: any UNKNOWN sessions go back to PENDING before matching.
@@ -146,6 +157,28 @@ class MatchingService(
         lastPollOk = true
 
         for (tx in batch) processTransaction(tx, now)
+        return true
+    }
+
+    /**
+     * Register-mode precheck performed BEFORE showing a QR: verify the bank is reachable by
+     * making a REAL token query (per the operator's preference — with multiple tokens one
+     * query per QR is well within the rate budget). Any transactions the query returns are
+     * reconciled normally (not lost). In simulation (no tokens) the bank is always "reachable".
+     * The query counts toward the polling cadence so we don't immediately re-query the token.
+     */
+    @Synchronized
+    fun probeBank(now: Long = System.currentTimeMillis()): Boolean {
+        if (tokenCount() == 0) return true // simulation: always reachable
+        if (running) return lastPollOk // a poll is already in flight; report its last outcome
+        running = true
+        try {
+            val ok = poll(now)
+            lastQueryAt = now
+            return ok
+        } finally {
+            running = false
+        }
     }
 
     /** Idempotent by externalId: a transaction processed once is never reprocessed. */
@@ -164,12 +197,20 @@ class MatchingService(
             receivedAt = Iso.format(now),
             matchedSessionId = null,
             unmatchedReason = null,
+            counterpartyName = tx.counterpartyName,
         )
 
         if (tx.currency != "CZK") {
             repo.recordTransaction(base.copy(unmatchedReason = "currency"))
             return
         }
+
+        // Paper-mode "watch" sessions bind the NEXT incoming payment regardless of VS
+        // (the paper QR is static, so payments usually carry no matching VS). A watch with
+        // no expected amount (amount == 0) matches any incoming; one with an expected amount
+        // matches only that exact amount. Oldest waiting watch wins.
+        if (matchWatch(tx, base, now)) return
+
         if (tx.vs.isNullOrEmpty()) {
             repo.recordTransaction(base.copy(unmatchedReason = "no-session"))
             return
@@ -190,6 +231,7 @@ class MatchingService(
             // Underpayment: do NOT mark success; session stays open until expiry/cancel.
             session.status = SessionStatus.UNDERPAID
             session.receivedAmount = tx.amount
+            session.payerName = tx.counterpartyName ?: session.payerName
             repo.updateSession(session)
             events.publishSessionChange(session)
             repo.recordTransaction(base.copy(matchedSessionId = session.id))
@@ -202,9 +244,34 @@ class MatchingService(
         session.receivedAmount = tx.amount
         session.paidAt = now
         session.matchedTxId = tx.externalId
+        session.payerName = tx.counterpartyName ?: session.payerName
         repo.updateSession(session)
         events.publishSessionChange(session)
         repo.recordTransaction(base.copy(matchedSessionId = session.id))
+    }
+
+    /**
+     * Try to bind [tx] to the oldest open paper-mode watch session. Returns true (and records
+     * the transaction as matched) when it did; false when no eligible watch is waiting.
+     */
+    private fun matchWatch(tx: BankTransaction, base: StoredTransaction, now: Long): Boolean {
+        val watch = repo.listSessions()
+            .filter { it.watch && isOpen(it.status) }
+            .sortedBy { it.createdAt }
+            .firstOrNull { w -> w.amount.signum() == 0 || w.amount.compareTo(tx.amount) == 0 }
+            ?: return false
+
+        val cmp = if (watch.amount.signum() == 0) 0 else tx.amount.compareTo(watch.amount)
+        watch.status = if (cmp > 0) SessionStatus.OVERPAID else SessionStatus.PAID
+        watch.overpaid = cmp > 0
+        watch.receivedAmount = tx.amount
+        watch.paidAt = now
+        watch.matchedTxId = tx.externalId
+        watch.payerName = tx.counterpartyName
+        repo.updateSession(watch)
+        events.publishSessionChange(watch)
+        repo.recordTransaction(base.copy(matchedSessionId = watch.id))
+        return true
     }
 
     private fun anyTerminalForVs(vs: String): Boolean =

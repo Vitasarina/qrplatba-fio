@@ -59,7 +59,11 @@ export function useSession(id: string | null): UseSessionResult {
     const handleData = (ev: MessageEvent) => {
       if (cancelled || !ev.data) return
       try {
-        setSession(JSON.parse(ev.data) as Session)
+        const frame = JSON.parse(ev.data) as Partial<Session>
+        // SSE frames are the minimal PUBLIC shape (no vs/spayd/note). Merge onto the
+        // existing snapshot so fields from the authenticated initial fetch (vs, note)
+        // survive live status updates.
+        setSession((prev) => (prev ? { ...prev, ...frame } : (frame as Session)))
         setError(null)
       } catch {
         // Ignore keep-alive comments / malformed frames.

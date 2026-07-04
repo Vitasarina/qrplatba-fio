@@ -36,6 +36,14 @@ data class PaymentSession(
     val note: String? = null,
     var overpaid: Boolean = false,
     var receivedAmount: Money? = null,
+    /**
+     * Paper-mode "watch" session: no on-screen QR (the QR is printed on paper), so the
+     * matcher ignores VS and instead binds the NEXT incoming payment. When [amount] is 0
+     * any incoming amount matches; when > 0 only that exact amount matches.
+     */
+    val watch: Boolean = false,
+    /** Name of the counterparty (payer) once matched — shown on the paper-mode result. */
+    var payerName: String? = null,
 )
 
 /** Persisted JSON shape (amount as 2dp string, dates as ISO strings). */
@@ -54,6 +62,8 @@ data class PaymentSessionJson(
     val note: String? = null,
     val overpaid: Boolean = false,
     val receivedAmount: String? = null,
+    val watch: Boolean = false,
+    val payerName: String? = null,
 )
 
 /** Public DTO returned by the API; matches the Node sessionToDTO shape exactly. */
@@ -72,6 +82,8 @@ data class SessionDTO(
     val note: String? = null,
     val overpaid: Boolean = false,
     val receivedAmount: String? = null,
+    val watch: Boolean = false,
+    val payerName: String? = null,
     val qrUrl: String,
 )
 
@@ -89,6 +101,8 @@ fun PaymentSession.toJson(): PaymentSessionJson = PaymentSessionJson(
     note = note,
     overpaid = overpaid,
     receivedAmount = receivedAmount?.setScale(2, java.math.RoundingMode.HALF_UP)?.toPlainString(),
+    watch = watch,
+    payerName = payerName,
 )
 
 fun PaymentSessionJson.toSession(): PaymentSession = PaymentSession(
@@ -105,6 +119,46 @@ fun PaymentSessionJson.toSession(): PaymentSession = PaymentSession(
     note = note,
     overpaid = overpaid,
     receivedAmount = receivedAmount?.let { BigDecimal(it) },
+    watch = watch,
+    payerName = payerName,
+)
+
+/**
+ * Minimal, non-sensitive DTO for UNAUTHENTICATED endpoints (customer-facing display,
+ * SSE frames). Deliberately omits the raw SPAYD (carries the IBAN), the VS, the operator
+ * note and the matched-tx id — anything that would let any device on the (possibly public)
+ * LAN scrape payment details. It carries only what a display needs to render: amount,
+ * status and the QR image URL. The QR PNG endpoint stays public so the customer can scan it.
+ */
+@Serializable
+data class PublicSessionDTO(
+    val id: String,
+    val amount: String,
+    val currency: String,
+    val status: String,
+    val createdAt: String,
+    val expiresAt: String,
+    val paidAt: String? = null,
+    val overpaid: Boolean = false,
+    val receivedAmount: String? = null,
+    val watch: Boolean = false,
+    val payerName: String? = null,
+    val qrUrl: String,
+)
+
+fun PaymentSession.toPublicDTO(): PublicSessionDTO = PublicSessionDTO(
+    id = id,
+    amount = amount.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString(),
+    currency = currency,
+    status = status.name,
+    createdAt = Iso.format(createdAt),
+    expiresAt = Iso.format(expiresAt),
+    paidAt = paidAt?.let { Iso.format(it) },
+    overpaid = overpaid,
+    receivedAmount = receivedAmount?.setScale(2, java.math.RoundingMode.HALF_UP)?.toPlainString(),
+    watch = watch,
+    payerName = payerName,
+    qrUrl = "/api/qr/$id.png",
 )
 
 fun PaymentSession.toDTO(): SessionDTO = SessionDTO(
@@ -121,5 +175,7 @@ fun PaymentSession.toDTO(): SessionDTO = SessionDTO(
     note = note,
     overpaid = overpaid,
     receivedAmount = receivedAmount?.setScale(2, java.math.RoundingMode.HALF_UP)?.toPlainString(),
+    watch = watch,
+    payerName = payerName,
     qrUrl = "/api/qr/$id.png",
 )

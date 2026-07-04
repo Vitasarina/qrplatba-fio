@@ -3,7 +3,11 @@ import { useNavigate } from 'react-router-dom'
 import { api, urls } from '../lib/api'
 import { useSession } from '../lib/useSession'
 import { formatCzk, isTerminal } from '../lib/format'
-import type { DisplayConfig, Session } from '../types'
+import { playFail, playSuccess, unlockSound } from '../lib/sound'
+import { ModeSelect } from '../components/ModeSelect'
+import { PaperWatch } from '../components/PaperWatch'
+import { TodayOverlay } from '../components/TodayPayments'
+import type { DisplayConfig, OpMode, Session } from '../types'
 
 // Two-sided kiosk display. The phone lies FLAT between the operator and the
 // customer, who sit on opposite sides — so screens are oriented 180° apart.
@@ -35,6 +39,9 @@ export function DisplayPage() {
   // immediately (before auto-discovery catches up) and so a close can cancel it.
   const [localId, setLocalId] = useState<string | null>(null)
   const [view, setView] = useState<View>('idle')
+  const [showToday, setShowToday] = useState(false)
+  // Bumped on any interaction while the numpad is up; resets the inactivity timer.
+  const [activityTick, setActivityTick] = useState(0)
   const navigate = useNavigate()
 
   // Hidden admin trigger: 5 quick taps in the top-right corner open the admin screen.
@@ -86,6 +93,7 @@ export function DisplayPage() {
     name: '',
     logoUrl: '',
     mode: undefined,
+    opMode: undefined,
     flipped: false,
   })
   useEffect(() => {
@@ -127,6 +135,21 @@ export function DisplayPage() {
     return () => clearTimeout(t)
   }, [held?.id])
 
+  // Result sound, once per terminal transition (success chime / failure buzz).
+  const sounded = useRef<string | null>(null)
+  useEffect(() => {
+    if (!session) return
+    const key = `${session.id}:${session.status}`
+    if (sounded.current === key) return
+    if (session.status === 'PAID' || session.status === 'OVERPAID') {
+      sounded.current = key
+      playSuccess()
+    } else if (session.status === 'EXPIRED') {
+      sounded.current = key
+      playFail()
+    }
+  }, [session?.id, session?.status])
+
   // Precedence: a live unfinished payment wins; otherwise the held 10 s result; else none.
   const shown: Session | null = session && !isTerminal(session.status) ? session : held
 
@@ -144,6 +167,14 @@ export function DisplayPage() {
       setLocalId(null)
     }
   }, [shown])
+
+  // Numpad inactivity: after 30 s without a tap, return to the idle screensaver.
+  // Reset by any interaction (activityTick) and paused while the today overlay is open.
+  useEffect(() => {
+    if (view !== 'entry' || showToday) return
+    const t = setTimeout(() => setView('idle'), 30000)
+    return () => clearTimeout(t)
+  }, [view, showToday, activityTick])
 
   // Close gesture: cancel any live (non-terminal) session, then return to idle.
   const closeToIdle = useCallback(() => {
@@ -166,6 +197,8 @@ export function DisplayPage() {
   const lastTap = useRef(0)
   function onSurfaceTap(e: React.MouseEvent) {
     const target = e.target as HTMLElement
+    unlockSound() // any tap on the display is a chance to enable result sounds
+    setActivityTick((t) => t + 1) // count any tap as activity (resets idle timeout)
     // Ignore numpad taps (typing) and the hidden admin corner — both have their
     // own handlers and must not double-tap-navigate.
     if (target.closest('.numpad') || target.closest('.secret-trigger')) return
@@ -178,6 +211,26 @@ export function DisplayPage() {
     } else {
       lastTap.current = now
     }
+  }
+
+  // Paper mode: the on-device screen becomes the operator's "wait for payment"
+  // tool (the QR is on paper, so there is no two-sided numpad kiosk here).
+  if (displayConfig.opMode === 'paper') {
+    return (
+      <div className="display display-paper">
+        <div className="secret-trigger" onClick={onSecretTap} aria-hidden />
+        <PaperWatch />
+      </div>
+    )
+  }
+  // No mode chosen yet: show the startup picker (persists via the backend).
+  if (displayConfig.opMode === '') {
+    return (
+      <ModeSelect
+        current=""
+        onChosen={(m: OpMode) => setDisplayConfig((c) => ({ ...c, opMode: m }))}
+      />
+    )
   }
 
   // Rotation. Customer-facing screens (idle/session) and the operator-facing
@@ -204,10 +257,12 @@ export function DisplayPage() {
       )}
 
       {view === 'entry' ? (
-        <Numpad onSubmit={(id) => setLocalId(id)} />
+        <Numpad onSubmit={(id) => setLocalId(id)} onShowToday={() => setShowToday(true)} />
       ) : (
         <DisplayContent session={shown} displayConfig={displayConfig} />
       )}
+
+      {showToday && <TodayOverlay onClose={() => setShowToday(false)} />}
     </div>
   )
 }
@@ -215,7 +270,13 @@ export function DisplayPage() {
 // Custom numeric keypad (operator-facing). The amount is shown in a plain <div>
 // — NEVER an <input> — so the phone's system keyboard cannot appear. The buffer
 // is a raw decimal string the operator builds up; we format it for display.
-function Numpad({ onSubmit }: { onSubmit: (sessionId: string) => void }) {
+function Numpad({
+  onSubmit,
+  onShowToday,
+}: {
+  onSubmit: (sessionId: string) => void
+  onShowToday: () => void
+}) {
   const [buffer, setBuffer] = useState('') // raw, e.g. "149,9" or "0,05"
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -236,11 +297,17 @@ function Numpad({ onSubmit }: { onSubmit: (sessionId: string) => void }) {
     }
     setBusy(true)
     setError(null)
+    unlockSound() // enable result sounds on this user gesture
     try {
       const created = await api.createSession(amount)
       onSubmit(created.id) // hand the session to the parent → QR screen shows
-    } catch {
-      setError('Nepodařilo se vytvořit platbu. Zkuste to znovu.')
+    } catch (e) {
+      // A 503 means the bank precheck failed → QR intentionally not shown.
+      const msg =
+        e && typeof e === 'object' && 'message' in e && typeof (e as { message: unknown }).message === 'string'
+          ? (e as { message: string }).message
+          : 'Nepodařilo se vytvořit platbu. Zkuste to znovu.'
+      setError(msg)
       setBusy(false)
     }
   }
@@ -249,6 +316,9 @@ function Numpad({ onSubmit }: { onSubmit: (sessionId: string) => void }) {
 
   return (
     <div className="numpad">
+      <button type="button" className="numpad-today" onClick={onShowToday}>
+        Dnešní platby
+      </button>
       <div className="numpad-amount" aria-live="polite">
         {formatBuffer(buffer)} <span className="numpad-czk">Kč</span>
       </div>
@@ -296,6 +366,8 @@ function Numpad({ onSubmit }: { onSubmit: (sessionId: string) => void }) {
 function applyKey(prev: string, key: string): string {
   if (key === 'C') return ''
   if (key === 'back') return prev.slice(0, -1)
+  // Cap the amount at 9 entered characters (the on-screen grouping isn't counted).
+  if (prev.length >= 9) return prev
   if (key === ',') {
     if (prev.includes(',')) return prev // only one decimal separator
     if (prev === '') return '0,' // ",5" → "0,5"
@@ -320,10 +392,13 @@ function parseAmount(buffer: string): number | null {
   return Number.isFinite(n) ? n : null
 }
 
-// Format the buffer for the on-screen amount. Empty shows "0".
+// Format the buffer for the on-screen amount. Empty shows "0". The integer part is
+// grouped by thousands with a narrow no-break space (e.g. "1 000 000").
 function formatBuffer(buffer: string): string {
   if (buffer === '') return '0'
-  return buffer
+  const [intPart, decPart] = buffer.split(',')
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
+  return decPart !== undefined ? `${grouped},${decPart}` : grouped
 }
 
 function DisplayContent({

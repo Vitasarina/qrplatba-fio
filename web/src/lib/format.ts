@@ -27,6 +27,15 @@ export function formatTime(iso: string | null | undefined): string {
   return time.format(d)
 }
 
+// Time of day only (HH:MM), no date — used in the paper-mode today list.
+const clock = new Intl.DateTimeFormat('cs-CZ', { hour: '2-digit', minute: '2-digit' })
+export function formatClock(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  return clock.format(d)
+}
+
 export interface StatusMeta {
   label: string
   tone: 'pending' | 'success' | 'warning' | 'danger' | 'neutral'

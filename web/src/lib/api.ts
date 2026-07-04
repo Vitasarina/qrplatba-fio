@@ -1,4 +1,4 @@
-import type { AppConfig, DisplayConfig, NetInfo, Session, TodayTransaction } from '../types'
+import type { AppConfig, DisplayConfig, NetInfo, OpMode, Session, TodayTransaction } from '../types'
 import { getPin } from './pin'
 
 // Thrown for any non-2xx response. `status` lets callers special-case 401 (PIN).
@@ -91,10 +91,18 @@ export const api = {
     logoUrl: string
     tokens: string[]
     flipped: boolean
+    opMode?: OpMode
   }): Promise<AppConfig> {
     return request<AppConfig>('/api/config', {
       method: 'POST',
       body: JSON.stringify(cfg),
+    })
+  },
+  // Set only the operating (workflow) mode (kasa/paper), preserving the rest.
+  setOpMode(mode: OpMode): Promise<AppConfig> {
+    return request<AppConfig>('/api/opmode', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
     })
   },
 
@@ -102,6 +110,14 @@ export const api = {
     return request<Session>('/api/sessions', {
       method: 'POST',
       body: JSON.stringify({ amount, note: note || undefined }),
+    })
+  },
+  // Paper mode: start waiting for the next incoming payment. Optional exact amount
+  // narrows the match; omitted ⇒ the next incoming payment of any amount.
+  createWatchSession(amount?: number, note?: string): Promise<Session> {
+    return request<Session>('/api/sessions/watch', {
+      method: 'POST',
+      body: JSON.stringify({ amount: amount || undefined, note: note || undefined }),
     })
   },
   getSession(id: string): Promise<Session> {
@@ -138,6 +154,19 @@ export const api = {
   // reachable URLs (the server runs on the phone; window.location is 127.0.0.1).
   getNetInfo(): Promise<NetInfo> {
     return request<NetInfo>('/api/net-info')
+  },
+
+  // Service mode: whether LAN (remote) access is currently open, and for how long.
+  getServiceMode(): Promise<{ on: boolean; remainingMs: number; defaultMinutes?: number }> {
+    return request('/api/service-mode')
+  },
+  // Toggle the LAN access window. Enabling is device-only (loopback) on the backend;
+  // disabling is allowed from anywhere.
+  setServiceMode(on: boolean, minutes?: number): Promise<{ on: boolean; remainingMs: number }> {
+    return request('/api/service-mode', {
+      method: 'POST',
+      body: JSON.stringify({ on, minutes }),
+    })
   },
 
   // Clear the settings password back to first-run (the next entry to settings

@@ -6,8 +6,10 @@ import cz.qrplatba.domain.AmountError
 import cz.qrplatba.domain.ConfigError
 import cz.qrplatba.domain.MAX_TOKENS
 import cz.qrplatba.domain.MerchantConfig
+import cz.qrplatba.domain.PasswordHash
 import cz.qrplatba.domain.isOpen
 import cz.qrplatba.domain.toDTO
+import cz.qrplatba.domain.toPublicDTO
 import cz.qrplatba.gateway.BankGateway
 import cz.qrplatba.persistence.JsonSessionRepository
 import cz.qrplatba.persistence.SessionFilter
@@ -25,6 +27,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
+import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
@@ -97,10 +100,44 @@ class AppServer(
 
     private fun Application.module() {
         install(ContentNegotiation) { json(Json { encodeDefaults = true }) }
+        // Gate LAN access behind service mode (loopback / on-device is always allowed).
+        intercept(ApplicationCallPipeline.Plugins) {
+            if (lanBlocked(call.isLoopback(), serviceModeActive())) {
+                if (call.request.uri.startsWith("/api/")) {
+                    call.respond(
+                        HttpStatusCode.ServiceUnavailable,
+                        mapOf(
+                            "error" to "service_mode_off",
+                            "message" to "Vzdálený přístup je vypnutý. Zapněte servisní režim na displeji zařízení.",
+                        ),
+                    )
+                } else {
+                    call.respondText(SERVICE_OFF_HTML, ContentType.Text.Html, HttpStatusCode.ServiceUnavailable)
+                }
+                finish()
+            }
+        }
         routing {
             registerApiRoutes()
             registerStaticAndSpa()
         }
+    }
+
+    companion object {
+        /** Pure gate decision (testable): block a request from the LAN unless service mode is active. */
+        fun lanBlocked(loopback: Boolean, serviceActive: Boolean): Boolean = !loopback && !serviceActive
+
+        private val SERVICE_OFF_HTML = """
+            <!doctype html><html lang="cs"><head><meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Vzdálený přístup vypnutý</title>
+            <style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#f8fafc;
+            display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:2rem;text-align:center}
+            div{max-width:30rem}h1{font-size:1.5rem}p{color:#94a3b8;line-height:1.5}</style></head>
+            <body><div><h1>Vzdálený přístup je vypnutý</h1>
+            <p>Pro konfiguraci nebo kontrolu plateb z tohoto zařízení zapněte <strong>servisní režim</strong>
+            přímo na displeji terminálu (5× ťukněte do pravého horního rohu → Servisní režim).</p></div></body></html>
+        """.trimIndent()
     }
 
     // ---------- helpers ----------
@@ -114,10 +151,57 @@ class AppServer(
     /** Whether the mandatory settings password has been created. */
     private fun passwordSet(): Boolean = storedPassword().isNotBlank()
 
+    // ---- brute-force lockout (single shared password; in-memory, per-process) ----
+    private val authLock = Any()
+    private var authFails = 0
+    private var lockedUntil = 0L
+
+    /** Remaining lockout in ms (0 = not locked). */
+    private fun authLockedForMs(now: Long): Long = synchronized(authLock) { maxOf(0L, lockedUntil - now) }
+
+    private fun recordAuthFailure(now: Long) = synchronized(authLock) {
+        authFails++
+        // After 5 consecutive failures, lock out with escalating backoff (5 s per extra
+        // failure, capped at 60 s). Any success resets the counter.
+        if (authFails >= 5) {
+            val extra = minOf(60_000L, (authFails - 4) * 5_000L)
+            lockedUntil = now + extra
+        }
+    }
+
+    private fun recordAuthSuccess() = synchronized(authLock) { authFails = 0; lockedUntil = 0 }
+
+    // ---- service mode: LAN access only on demand (small plaintext-HTTP attack window) ----
+    // The server always listens, but requests from OTHER devices on the LAN are blocked
+    // UNLESS the operator has enabled "service mode" from the on-device admin screen. This
+    // means during normal on-device operation NO sensitive data ever crosses the LAN wire;
+    // it is exposed only during a short, operator-initiated, auto-expiring admin window.
+    @Volatile private var serviceModeUntil: Long = 0L
+    /** Default / maximum service-mode window in minutes. */
+    private val serviceModeDefaultMinutes = 15
+    private val serviceModeMaxMinutes = 120
+
+    fun serviceModeActive(now: Long = System.currentTimeMillis()): Boolean = now < serviceModeUntil
+    private fun serviceModeRemainingMs(now: Long = System.currentTimeMillis()): Long =
+        maxOf(0L, serviceModeUntil - now)
+
+    /**
+     * Validate the supplied x-pin against the stored password WITHOUT sending a response or
+     * touching the lockout. Used to content-vary otherwise-public endpoints (a wrong/absent
+     * pin simply yields the minimal public view — no secret is exposed, so no brute-force value).
+     */
+    private fun ApplicationCall.isPinValid(): Boolean {
+        val stored = storedPassword()
+        if (stored.isBlank()) return false
+        val supplied = request.headers["x-pin"] ?: return false
+        return PasswordHash.verify(supplied, stored)
+    }
+
     /**
      * Guard for operator/config endpoints. There is NO default password: when none is set
      * (first run) EVERY guarded endpoint is rejected (401) — the only way forward is to
-     * create one via POST /api/password/setup. Once set, requires x-pin == stored password.
+     * create one via POST /api/password/setup. Once set, requires a valid x-pin HEADER
+     * (cookie auth removed to avoid a CSRF vector). A brute-force lockout applies.
      */
     private suspend fun ApplicationCall.requirePin(): Boolean {
         val stored = storedPassword()
@@ -125,13 +209,22 @@ class AppServer(
             respond(HttpStatusCode.Unauthorized, mapOf("error" to "unauthorized", "message" to "password not set"))
             return false
         }
-        val header = request.headers["x-pin"]
-        val cookie = request.cookies["pin"]
-        val supplied = header ?: cookie
-        if (supplied != stored) {
+        val now = System.currentTimeMillis()
+        val wait = authLockedForMs(now)
+        if (wait > 0) {
+            respond(
+                HttpStatusCode.TooManyRequests,
+                mapOf("error" to "locked", "message" to "příliš mnoho pokusů, zkuste to za ${(wait / 1000) + 1} s"),
+            )
+            return false
+        }
+        val supplied = request.headers["x-pin"]
+        if (supplied == null || !PasswordHash.verify(supplied, stored)) {
+            recordAuthFailure(now)
             respond(HttpStatusCode.Unauthorized, mapOf("error" to "unauthorized", "message" to "valid password required"))
             return false
         }
+        recordAuthSuccess()
         return true
     }
 
@@ -145,8 +238,11 @@ class AppServer(
                 respond(HttpStatusCode.Conflict, mapOf("error" to "not_configured", "message" to (err.message ?: "")))
             is NotLicensedError ->
                 respond(HttpStatusCode.Forbidden, mapOf("error" to "not_licensed", "message" to (err.message ?: "")))
-            else ->
-                respond(HttpStatusCode.InternalServerError, mapOf("error" to "internal", "message" to (err.message ?: "error")))
+            else -> {
+                // Do NOT leak internal exception detail to the client; log it instead.
+                System.err.println("AppServer: internal error: ${err.message}")
+                respond(HttpStatusCode.InternalServerError, mapOf("error" to "internal", "message" to "interní chyba serveru"))
+            }
         }
     }
 
@@ -285,6 +381,7 @@ class AppServer(
                 val dto = sessions.setConfig(
                     b.str("name"), b.str("iban"), tokens,
                     b.str("licenseKey"), b.str("logoUrl"), b.bool("flipped"),
+                    b.str("opMode"),
                 )
                 call.respond(dto)
             } catch (e: Throwable) {
@@ -297,13 +394,44 @@ class AppServer(
             sessions.reset()
             call.respond(buildJsonObject { put("ok", true) })
         }
+        // Set the operating (workflow) mode: {"mode":"kasa"|"paper"|""}. Preserves the rest.
+        post("/api/opmode") {
+            if (!call.requirePin()) return@post
+            try {
+                val b = call.parseBody()
+                call.respond(sessions.setOpMode(b.str("mode")))
+            } catch (e: Throwable) {
+                call.sendError(e)
+            }
+        }
 
         // ---- sessions ----
         post("/api/sessions") {
             if (!call.requirePin()) return@post
             try {
+                // Register mode: before publishing a QR we must be able to verify the payment
+                // later. Probe the bank with a REAL token query; if it is unreachable, refuse
+                // rather than show a QR we can't reconcile. (Simulation always probes true.)
+                if (!matching.probeBank()) {
+                    call.respond(HttpStatusCode.ServiceUnavailable, buildJsonObject {
+                        put("error", "bank_unreachable")
+                        put("message", "Nelze ověřit spojení s bankou. QR platba nebyla vystavena — zkontrolujte připojení k internetu.")
+                    })
+                    return@post
+                }
                 val b = call.parseBody()
                 val s = sessions.createSession(b.str("amount"), b.str("note"))
+                call.respond(HttpStatusCode.Created, s.toDTO())
+            } catch (e: Throwable) {
+                call.sendError(e)
+            }
+        }
+        // Paper mode: start waiting for the NEXT incoming payment (optional exact amount).
+        post("/api/sessions/watch") {
+            if (!call.requirePin()) return@post
+            try {
+                val b = call.parseBody()
+                val s = sessions.createWatchSession(b.str("amount"), b.str("note"))
                 call.respond(HttpStatusCode.Created, s.toDTO())
             } catch (e: Throwable) {
                 call.sendError(e)
@@ -335,13 +463,17 @@ class AppServer(
             if (active == null) {
                 call.respondText("null", ContentType.Application.Json)
             } else {
-                call.respond(active.toDTO())
+                // Public: minimal DTO only (no IBAN/SPAYD, VS or note).
+                call.respond(active.toPublicDTO())
             }
         }
         get("/api/sessions/{id}") {
             val id = call.parameters["id"]!!
             try {
-                call.respond(sessions.getSession(id).toDTO())
+                val s = sessions.getSession(id)
+                // Full details only for an authenticated operator; the public/display view
+                // gets the minimal DTO (a wrong/absent pin is not an error here).
+                if (call.isPinValid()) call.respond(s.toDTO()) else call.respond(s.toPublicDTO())
             } catch (e: Throwable) {
                 call.sendError(e)
             }
@@ -414,12 +546,13 @@ class AppServer(
                 })
                 return@post
             }
-            // Persist the password; create a minimal config row if none exists yet.
+            // Persist the password HASHED; create a minimal config row if none exists yet.
+            val hashed = PasswordHash.hash(pw)
             val cur = repo.getConfig()
             if (cur == null) {
-                repo.setConfig(MerchantConfig(name = "", iban = "", tokens = emptyList(), pin = pw))
+                repo.setConfig(MerchantConfig(name = "", iban = "", tokens = emptyList(), pin = hashed))
             } else {
-                repo.setConfig(cur.copy(pin = pw, legacyToken = null))
+                repo.setConfig(cur.copy(pin = hashed, legacyToken = null))
             }
             call.respond(buildJsonObject { put("ok", true) })
         }
@@ -430,7 +563,7 @@ class AppServer(
             val b = call.parseBody()
             val current = (b.str("current") ?: "")
             val next = (b.str("new") ?: "").trim()
-            if (current != storedPassword()) {
+            if (!PasswordHash.verify(current, storedPassword())) {
                 call.respond(HttpStatusCode.Unauthorized, buildJsonObject {
                     put("error", "unauthorized"); put("message", "current password mismatch")
                 })
@@ -442,7 +575,7 @@ class AppServer(
                 })
                 return@post
             }
-            repo.getConfig()?.let { repo.setConfig(it.copy(pin = next, legacyToken = null)) }
+            repo.getConfig()?.let { repo.setConfig(it.copy(pin = PasswordHash.hash(next), legacyToken = null)) }
             call.respond(buildJsonObject { put("ok", true) })
         }
 
@@ -467,11 +600,13 @@ class AppServer(
                 return@get
             }
 
-            // Bridge EventBus callbacks (any thread) into the coroutine writer.
+            // Bridge EventBus callbacks (any thread) into the coroutine writer. SSE cannot
+            // carry the x-pin header, so frames are the minimal PUBLIC DTO; the operator UI
+            // merges them onto its authenticated full snapshot (keeps VS/note).
             val channel = Channel<String>(Channel.UNLIMITED)
-            channel.trySend(json.encodeToString(cz.qrplatba.domain.SessionDTO.serializer(), current.toDTO()))
+            channel.trySend(json.encodeToString(cz.qrplatba.domain.PublicSessionDTO.serializer(), current.toPublicDTO()))
             val unsubscribe = events.onSessionChange(id) { s ->
-                channel.trySend(json.encodeToString(cz.qrplatba.domain.SessionDTO.serializer(), s.toDTO()))
+                channel.trySend(json.encodeToString(cz.qrplatba.domain.PublicSessionDTO.serializer(), s.toPublicDTO()))
             }
 
             call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
@@ -527,6 +662,39 @@ class AppServer(
             call.respondBytes(Qr.spaydToPng(data), ContentType.Image.PNG)
         }
 
+        // ---- service mode (LAN access window; toggled from the on-device admin) ----
+        get("/api/service-mode") {
+            call.respond(buildJsonObject {
+                put("on", serviceModeActive())
+                put("remainingMs", serviceModeRemainingMs())
+                put("defaultMinutes", serviceModeDefaultMinutes)
+            })
+        }
+        post("/api/service-mode") {
+            val b = call.parseBody()
+            val on = b.bool("on") ?: false
+            if (on) {
+                // Opening the LAN window is gated by physical possession (loopback only).
+                if (!call.isLoopback()) {
+                    call.respond(HttpStatusCode.Forbidden, buildJsonObject {
+                        put("error", "forbidden")
+                        put("message", "Servisní režim lze zapnout jen přímo na zařízení.")
+                    })
+                    return@post
+                }
+                val minutes = (b.str("minutes")?.toIntOrNull() ?: serviceModeDefaultMinutes)
+                    .coerceIn(1, serviceModeMaxMinutes)
+                serviceModeUntil = System.currentTimeMillis() + minutes * 60_000L
+            } else {
+                // Closing the window is always allowed (never a security risk).
+                serviceModeUntil = 0L
+            }
+            call.respond(buildJsonObject {
+                put("on", serviceModeActive())
+                put("remainingMs", serviceModeRemainingMs())
+            })
+        }
+
         get("/api/health") { call.respond(buildJsonObject { put("ok", true) }) }
     }
 
@@ -557,6 +725,9 @@ class AppServer(
 
     /** Resolve a request path to a bundled asset under web/. Returns (contentType, bytes) or null. */
     private fun resolveAsset(uri: String): Pair<ContentType, ByteArray>? {
+        // Reject path traversal / absolute-path attempts outright.
+        val decoded = try { java.net.URLDecoder.decode(uri, "UTF-8") } catch (e: Exception) { uri }
+        if (decoded.contains("..") || decoded.contains('\\') || decoded.contains(' ')) return null
         val path = uri.trimStart('/')
         if (path.isEmpty() || path == "index.html") {
             val bytes = assetLoader("web/index.html") ?: return null
